@@ -1,0 +1,44 @@
+[package]
+name = "dta_backend"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "DATA-TO-ACTION: Secure, Read-Only, Evidence-Based Enterprise Text-to-SQL & Analytics Backend"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+    "rust_decimal",
+] }
+sqlparser = "0.55"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rust_decimal = { version = "1", features = ["serde-with-float"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+argon2 = "0.5"
+jsonwebtoken = "9"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+thiserror = "2"
+dotenvy = "0.15"
+async-trait = "0.1"
+regex = "1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

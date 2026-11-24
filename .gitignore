@@ -1,0 +1,20 @@
+# Local environment secrets and runtime state
+.env
+.env.local
+.local/
+
+# Rust build artifacts
+backend/target/
+**/*.rs.bk
+
+# Node / Next.js artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/coverage/
+*.tsbuildinfo
+
+# Logs and OS artifacts
+*.log
+.DS_Store
+Thumbs.db
