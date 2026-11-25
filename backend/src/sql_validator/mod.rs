@@ -64,20 +64,42 @@ pub struct ValidationReport {
 
 #[derive(Clone)]
 struct ScopeContext {
-    /// alias_lowercase -> (schema_lowercase, table_lowercase) for real tables
+    /// alias_lowercase -> (schema_lowercase, table_lowercase) for real tables in current SELECT
     table_aliases: BTreeMap<String, (String, String)>,
+    /// alias_lowercase -> (schema_lowercase, table_lowercase) inherited from enclosing SELECT for correlated subqueries
+    outer_table_aliases: BTreeMap<String, (String, String)>,
     /// CTE or derived table alias_lowercase -> exposed column names (None = unknown/unrestricted inside CTE)
     cte_columns: BTreeMap<String, Option<BTreeSet<String>>>,
-    /// Real tables in scope (schema, table)
+    /// Real tables directly referenced in current SELECT's FROM/JOIN (isolated from outer SELECT)
     real_tables: Vec<(String, String)>,
+    /// Real tables inherited from enclosing SELECT for correlated column resolution
+    outer_real_tables: Vec<(String, String)>,
 }
 
 impl ScopeContext {
     fn new() -> Self {
         Self {
             table_aliases: BTreeMap::new(),
+            outer_table_aliases: BTreeMap::new(),
             cte_columns: BTreeMap::new(),
             real_tables: Vec::new(),
+            outer_real_tables: Vec::new(),
+        }
+    }
+
+    fn enter_child(&self) -> Self {
+        let mut outer_table_aliases = self.outer_table_aliases.clone();
+        for (k, v) in &self.table_aliases {
+            outer_table_aliases.insert(k.clone(), v.clone());
+        }
+        let mut outer_real_tables = self.outer_real_tables.clone();
+        outer_real_tables.extend(self.real_tables.iter().cloned());
+        Self {
+            table_aliases: BTreeMap::new(),
+            outer_table_aliases,
+            cte_columns: self.cte_columns.clone(),
+            real_tables: Vec::new(),
+            outer_real_tables,
         }
     }
 }
@@ -458,7 +480,15 @@ fn validate_set_expr(
             let cols = validate_query(q, scope, state, inside_recursive_cte)?;
             Ok((cols, scope.clone()))
         }
-        SetExpr::SetOperation { left, right, .. } => {
+        SetExpr::SetOperation { op, left, right, .. } => {
+            if !matches!(
+                op,
+                sqlparser::ast::SetOperator::Union
+                    | sqlparser::ast::SetOperator::Intersect
+                    | sqlparser::ast::SetOperator::Except
+            ) {
+                return Err(format!("Unsupported set operation: {op:?}"));
+            }
             let (l_cols, _) = validate_set_expr(left, scope, state, inside_recursive_cte)?;
             let _ = validate_set_expr(right, scope, state, inside_recursive_cte)?;
             Ok((l_cols, scope.clone()))
@@ -487,15 +517,15 @@ fn validate_select(
         return Err("SELECT ... INTO is prohibited (creates/writes tables).".to_string());
     }
 
-    if let Some(Distinct::On(exprs)) = &select.distinct {
-        for e in exprs {
-            validate_expr(e, parent_scope, state, None)?;
-        }
-    }
-
-    let mut local_scope = parent_scope.clone();
+    let mut local_scope = parent_scope.enter_child();
     for twj in &select.from {
         register_table_with_joins(twj, &mut local_scope, state)?;
+    }
+
+    if let Some(Distinct::On(exprs)) = &select.distinct {
+        for e in exprs {
+            validate_expr(e, &local_scope, state, None)?;
+        }
     }
 
     // Validate SELECT projections and track output column names/aliases
@@ -513,14 +543,14 @@ fn validate_select(
                 output_aliases.insert(alias.value.to_lowercase());
             }
             SelectItem::Wildcard(_) => {
-                // Reject SELECT * if ANY real table in scope has RBAC denied columns
+                // Reject SELECT * if ANY real table in current SELECT's FROM/JOIN has RBAC denied columns
                 for (schema, table) in &local_scope.real_tables {
                     if state.policy.table_has_denied_columns(schema, table) {
                         return Err(format!(
                             "Wildcard SELECT * is denied on '{schema}.{table}' because it contains restricted columns for your role."
                         ));
                     }
-                    if let Some(tm) = find_single_table(state.catalog, Some(schema), table).ok() {
+                    if let Ok(tm) = find_single_table(state.catalog, Some(schema), table) {
                         for col in &tm.columns {
                             state
                                 .referenced_columns
@@ -961,6 +991,26 @@ fn validate_expr(
             }
             Ok(())
         }
+        Expr::AtTimeZone { timestamp, time_zone } => {
+            validate_expr(timestamp, scope, state, select_aliases)?;
+            validate_expr(time_zone, scope, state, select_aliases)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            validate_expr(left, scope, state, select_aliases)?;
+            validate_expr(right, scope, state, select_aliases)
+        }
+        Expr::JsonAccess { value, path } => {
+            validate_expr(value, scope, state, select_aliases)?;
+            for elem in &path.path {
+                match elem {
+                    sqlparser::ast::JsonPathElem::Dot { .. } => {}
+                    sqlparser::ast::JsonPathElem::Bracket { key } => {
+                        validate_expr(key, scope, state, select_aliases)?;
+                    }
+                }
+            }
+            Ok(())
+        }
         other => Err(format!("Unsupported or disallowed SQL expression: {other}")),
     }
 }
@@ -1022,19 +1072,17 @@ fn validate_function(
         validate_expr(filter, scope, state, select_aliases)?;
     }
 
-    if let Some(over) = &func.over {
-        if let WindowType::WindowSpec(WindowSpec {
-            partition_by,
-            order_by,
-            ..
-        }) = over
-        {
-            for p in partition_by {
-                validate_expr(p, scope, state, select_aliases)?;
-            }
-            for ob in order_by {
-                validate_expr(&ob.expr, scope, state, select_aliases)?;
-            }
+    if let Some(WindowType::WindowSpec(WindowSpec {
+        partition_by,
+        order_by,
+        ..
+    })) = &func.over
+    {
+        for p in partition_by {
+            validate_expr(p, scope, state, select_aliases)?;
+        }
+        for ob in order_by {
+            validate_expr(&ob.expr, scope, state, select_aliases)?;
         }
     }
 
@@ -1085,7 +1133,7 @@ fn validate_unqualified_column(
     }
 
     let mut matched_real: Vec<(String, String)> = Vec::new();
-    for (schema, table) in &scope.real_tables {
+    for (schema, table) in scope.real_tables.iter().chain(scope.outer_real_tables.iter()) {
         if let Ok(tm) = find_single_table(state.catalog, Some(schema), table) {
             if tm.columns.iter().any(|c| c.name.eq_ignore_ascii_case(col)) {
                 if state.policy.is_column_denied(schema, table, col) {
@@ -1094,7 +1142,10 @@ fn validate_unqualified_column(
                         state.policy.role
                     ));
                 }
-                matched_real.push((tm.schema.clone(), tm.name.clone()));
+                let pair = (tm.schema.clone(), tm.name.clone());
+                if !matched_real.contains(&pair) {
+                    matched_real.push(pair);
+                }
             }
         }
     }
@@ -1138,7 +1189,11 @@ fn validate_compound_column(
         2 => {
             let qual = idents[0].value.to_lowercase();
             let col = idents[1].value.to_lowercase();
-            if let Some((schema, table)) = scope.table_aliases.get(&qual) {
+            if let Some((schema, table)) = scope
+                .table_aliases
+                .get(&qual)
+                .or_else(|| scope.outer_table_aliases.get(&qual))
+            {
                 return verify_real_table_column(schema, table, &col, state);
             }
             if let Some(cte_cols) = scope.cte_columns.get(&qual) {

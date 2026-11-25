@@ -13,6 +13,15 @@ use crate::{
     semantic::SemanticMetric,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurn {
+    pub question: String,
+    #[serde(default)]
+    pub sql: String,
+    #[serde(default)]
+    pub explanation: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmSqlGenerationRequest<'a> {
     pub question: &'a str,
@@ -21,6 +30,7 @@ pub struct LlmSqlGenerationRequest<'a> {
     pub semantics: &'a [SemanticMetric],
     pub preferred_metric: Option<&'a str>,
     pub row_limit: u32,
+    pub conversation_history: &'a [ConversationTurn],
 }
 
 #[derive(Debug, Clone)]

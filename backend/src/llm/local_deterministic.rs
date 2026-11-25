@@ -95,11 +95,22 @@ impl LlmProvider for LocalDeterministicPlanner {
         }
 
         // 4. Verify required schema tables exist in permitted catalog
+        let effective_q = if !req.conversation_history.is_empty()
+            && q_lower.split_whitespace().count() <= 8
+        {
+            if let Some(prev) = req.conversation_history.last() {
+                format!("{} {}", prev.question.to_lowercase(), q_lower)
+            } else {
+                q_lower.clone()
+            }
+        } else {
+            q_lower.clone()
+        };
         let cat = req.full_catalog;
         let use_gross = req
             .preferred_metric
             .map(|m| m.to_lowercase().contains("gross"))
-            .unwrap_or_else(|| q_lower.contains("gross"));
+            .unwrap_or_else(|| effective_q.contains("gross"));
 
         let rev_col = if use_gross {
             "gross_amount"
@@ -245,11 +256,16 @@ impl LlmProvider for LocalDeterministicPlanner {
         }
 
         // Pattern E: Regions with declining sales
-        if q_lower.contains("region")
-            && (q_lower.contains("declin") || q_lower.contains("drop") || q_lower.contains("decreas") || q_lower.contains("growth"))
+        if effective_q.contains("region")
+            && (effective_q.contains("declin") || effective_q.contains("drop") || effective_q.contains("decreas") || effective_q.contains("growth"))
             && has_table(cat, "analytics", "orders")
             && has_table(cat, "analytics", "regions")
         {
+            let year_bound = extract_years(&effective_q)
+                .into_iter()
+                .next()
+                .map(|y| format!("DATE '{y}-01-01'"))
+                .unwrap_or_else(|| "DATE_TRUNC('year', CURRENT_DATE)".to_string());
             let sql = format!(
                 "WITH quarterly_regional_sales AS ( \
                     SELECT r.region_code, r.region_name, \
@@ -258,7 +274,7 @@ impl LlmProvider for LocalDeterministicPlanner {
                     FROM analytics.orders o \
                     JOIN analytics.regions r ON r.region_id = o.region_id \
                     WHERE o.status IN ('COMPLETED', 'SHIPPED') \
-                    AND o.order_date >= DATE '2026-01-01' \
+                    AND o.order_date >= {year_bound} \
                     AND o.order_date < DATE_TRUNC('quarter', CURRENT_DATE) \
                     GROUP BY r.region_code, r.region_name, DATE_TRUNC('quarter', o.order_date) \
                 ), \
@@ -278,14 +294,14 @@ impl LlmProvider for LocalDeterministicPlanner {
             );
             return Ok(LlmSqlOutput {
                 sql: Some(sql),
-                explanation: "Identifies regions where completed full-quarter revenue declined compared to the immediately preceding quarter in 2026.".to_string(),
+                explanation: "Identifies regions where completed full-quarter revenue declined compared to the immediately preceding quarter.".to_string(),
                 assumptions: vec![
                     "Excludes incomplete current quarter to prevent false decline alerts.".to_string(),
                     format!("Compares full quarters using analytics.orders.{rev_col}."),
                 ],
                 applied_filters: vec![
                     "o.status IN ('COMPLETED', 'SHIPPED')".to_string(),
-                    "o.order_date >= DATE '2026-01-01' AND o.order_date < DATE_TRUNC('quarter', CURRENT_DATE)".to_string(),
+                    format!("o.order_date >= {year_bound} AND o.order_date < DATE_TRUNC('quarter', CURRENT_DATE)"),
                 ],
                 clarification_needed: None,
                 clarification_options: vec![],
@@ -294,20 +310,34 @@ impl LlmProvider for LocalDeterministicPlanner {
         }
 
         // Pattern F: Compare revenue between two periods
-        if q_lower.contains("compare")
-            && (q_lower.contains("revenue") || q_lower.contains("sales"))
+        if (effective_q.contains("compare") || effective_q.contains("comparison"))
+            && (effective_q.contains("revenue") || effective_q.contains("sales"))
             && has_table(cat, "analytics", "orders")
         {
-            let sql = if q_lower.contains("2025") && q_lower.contains("2026") {
+            let years = extract_years(&effective_q);
+            let quarter_bounds = extract_quarter_comparison_bounds(&effective_q);
+            let sql = if let Some((start_date, end_date)) = quarter_bounds {
+                format!(
+                    "SELECT TO_CHAR(DATE_TRUNC('quarter', order_date), 'YYYY-\"Q\"Q') AS period_label, \
+                    COUNT(order_id) AS order_count, \
+                    ROUND(SUM({rev_col}), 2) AS {rev_label} \
+                    FROM analytics.orders \
+                    WHERE status IN ('COMPLETED', 'SHIPPED') \
+                    AND order_date >= DATE '{start_date}' AND order_date < DATE '{end_date}' \
+                    GROUP BY DATE_TRUNC('quarter', order_date) \
+                    ORDER BY DATE_TRUNC('quarter', order_date) ASC"
+                )
+            } else if years.len() >= 2 {
                 format!(
                     "SELECT EXTRACT(YEAR FROM order_date)::INTEGER AS period_year, \
                     COUNT(order_id) AS order_count, \
                     ROUND(SUM({rev_col}), 2) AS {rev_label} \
                     FROM analytics.orders \
                     WHERE status IN ('COMPLETED', 'SHIPPED') \
-                    AND EXTRACT(YEAR FROM order_date) IN (2025, 2026) \
+                    AND EXTRACT(YEAR FROM order_date) IN ({}, {}) \
                     GROUP BY EXTRACT(YEAR FROM order_date) \
-                    ORDER BY period_year ASC"
+                    ORDER BY period_year ASC",
+                    years[0], years[1]
                 )
             } else {
                 format!(
@@ -316,7 +346,8 @@ impl LlmProvider for LocalDeterministicPlanner {
                     ROUND(SUM({rev_col}), 2) AS {rev_label} \
                     FROM analytics.orders \
                     WHERE status IN ('COMPLETED', 'SHIPPED') \
-                    AND order_date >= DATE '2026-04-01' AND order_date < DATE '2026-10-01' \
+                    AND order_date >= DATE_TRUNC('quarter', CURRENT_DATE) - INTERVAL '6 months' \
+                    AND order_date < DATE_TRUNC('quarter', CURRENT_DATE) \
                     GROUP BY DATE_TRUNC('quarter', order_date) \
                     ORDER BY DATE_TRUNC('quarter', order_date) ASC"
                 )
@@ -400,8 +431,11 @@ impl LlmProvider for LocalDeterministicPlanner {
             });
         }
 
-        // Pattern I: General regional revenue breakdown
-        if q_lower.contains("region") && has_table(cat, "analytics", "orders") && has_table(cat, "analytics", "regions") {
+        // Pattern I: General regional revenue breakdown (supports multi-turn follow-up "by region")
+        if effective_q.contains("region")
+            && has_table(cat, "analytics", "orders")
+            && has_table(cat, "analytics", "regions")
+        {
             let sql = format!(
                 "SELECT r.region_code, r.region_name, COUNT(o.order_id) AS order_count, \
                 ROUND(SUM(o.{rev_col}), 2) AS total_{rev_label} \
@@ -422,8 +456,49 @@ impl LlmProvider for LocalDeterministicPlanner {
             });
         }
 
-        // Pattern J: Generic safe preview over highest-ranked linked table (never using SELECT * if denied columns exist!)
+        // Pattern J: Schema-generic aggregation or preview over highest-ranked linked table (never using SELECT *!)
         if let Some(top_tbl) = req.linked_schema.selected_tables.first() {
+            let wants_agg = effective_q.contains("total")
+                || effective_q.contains("sum")
+                || effective_q.contains("count")
+                || effective_q.contains("average")
+                || effective_q.contains("avg")
+                || effective_q.contains("by ")
+                || effective_q.contains("group");
+
+            let dim_col = top_tbl.columns.iter().find(|c| {
+                let dt = c.data_type.to_lowercase();
+                !c.is_primary_key && (dt.contains("char") || dt.contains("text"))
+            });
+            let metric_col = top_tbl.columns.iter().find(|c| {
+                let dt = c.data_type.to_lowercase();
+                !c.is_primary_key
+                    && !c.name.ends_with("_id")
+                    && (dt.contains("numeric") || dt.contains("decimal") || dt.contains("double") || dt.contains("real") || dt.contains("int"))
+            });
+
+            if wants_agg {
+                if let (Some(dim), Some(met)) = (dim_col, metric_col) {
+                    let lim = extract_top_n(&effective_q).unwrap_or(20).min(req.row_limit);
+                    let sql = format!(
+                        "SELECT {}, COUNT(*) AS record_count, ROUND(SUM({})::NUMERIC, 2) AS total_{} FROM {}.{} GROUP BY {} ORDER BY total_{} DESC LIMIT {}",
+                        dim.name, met.name, met.name, top_tbl.schema, top_tbl.name, dim.name, met.name, lim
+                    );
+                    return Ok(LlmSqlOutput {
+                        sql: Some(sql),
+                        explanation: format!(
+                            "Dynamically aggregates {} grouped by {} from verified table '{}.{}'.",
+                            met.name, dim.name, top_tbl.schema, top_tbl.name
+                        ),
+                        assumptions: vec![format!("Selected numeric column '{}' and categorical dimension '{}' from discovered schema metadata.", met.name, dim.name)],
+                        applied_filters: vec![format!("LIMIT {lim}")],
+                        clarification_needed: None,
+                        clarification_options: vec![],
+                        cannot_compute_reason: None,
+                    });
+                }
+            }
+
             let safe_cols: Vec<String> = top_tbl
                 .columns
                 .iter()
@@ -493,6 +568,7 @@ impl LlmProvider for LocalDeterministicPlanner {
                     semantics: req.semantics,
                     preferred_metric: Some("net_revenue"),
                     row_limit: req.row_limit,
+                    conversation_history: &[],
                 })
                 .await?;
             if let Some(candidate) = &regenerated.sql {
@@ -673,4 +749,43 @@ fn format_cell(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+fn extract_years(q_lower: &str) -> Vec<i32> {
+    let Ok(re) = regex::Regex::new(r"\b(20\d{2})\b") else {
+        return Vec::new();
+    };
+    let mut years = Vec::new();
+    for cap in re.captures_iter(q_lower) {
+        if let Some(m) = cap.get(1) {
+            if let Ok(y) = m.as_str().parse::<i32>() {
+                if !years.contains(&y) {
+                    years.push(y);
+                }
+            }
+        }
+    }
+    years
+}
+
+fn extract_quarter_comparison_bounds(q_lower: &str) -> Option<(String, String)> {
+    let re = regex::Regex::new(r"\bq([1-4])\s+(20\d{2})\b").ok()?;
+    let mut quarters: Vec<(i32, u32)> = Vec::new();
+    for cap in re.captures_iter(q_lower) {
+        let q: u32 = cap.get(1)?.as_str().parse().ok()?;
+        let y: i32 = cap.get(2)?.as_str().parse().ok()?;
+        quarters.push((y, q));
+    }
+    if quarters.len() < 2 {
+        return None;
+    }
+    quarters.sort();
+    let (y1, q1) = quarters[0];
+    let (y2, q2) = quarters[quarters.len() - 1];
+    let start_month = (q1 - 1) * 3 + 1;
+    let (end_y, end_m) = if q2 == 4 { (y2 + 1, 1) } else { (y2, q2 * 3 + 1) };
+    Some((
+        format!("{y1:04}-{start_month:02}-01"),
+        format!("{end_y:04}-{end_m:02}-01"),
+    ))
 }

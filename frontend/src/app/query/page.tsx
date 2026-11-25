@@ -17,10 +17,18 @@ import { ResultTable } from "@/components/ResultTable";
 import { SecurityStateBadge } from "@/components/SecurityStateBadge";
 import { SqlPreviewPanel } from "@/components/SqlPreviewPanel";
 import { api, getStoredUser } from "@/lib/api";
-import type { QueryPipelineResponse, UserProfile, ValidationReport } from "@/lib/types";
+import type {
+  ConnectionDto,
+  DashboardDto,
+  QueryPipelineResponse,
+  UserProfile,
+  ValidationReport,
+} from "@/lib/types";
 
 export default function QueryWorkspacePage() {
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [connections, setConnections] = useState<ConnectionDto[]>([]);
+  const [connectionId, setConnectionId] = useState<string>("");
   const [question, setQuestion] = useState("");
   const [examples, setExamples] = useState<string[]>([]);
   const [clarifyMode, setClarifyMode] = useState(true);
@@ -30,6 +38,18 @@ export default function QueryWorkspacePage() {
   const [error, setError] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [result, setResult] = useState<QueryPipelineResponse | null>(null);
+  const [sessionId, setSessionId] = useState<string>("");
+  const [turnHistory, setTurnHistory] = useState<
+    Array<{ question: string; sql: string; explanation: string }>
+  >([]);
+
+  // Pin-to-Dashboard modal/panel state
+  const [pinOpen, setPinOpen] = useState(false);
+  const [dashboards, setDashboards] = useState<DashboardDto[]>([]);
+  const [pinMode, setPinMode] = useState<"new" | "existing">("new");
+  const [targetDashboardId, setTargetDashboardId] = useState("");
+  const [newDashboardTitle, setNewDashboardTitle] = useState("");
+  const [pinning, setPinning] = useState(false);
 
   // Manual SQL inspection / sandboxed verification tab
   const [showManualSql, setShowManualSql] = useState(false);
@@ -38,10 +58,34 @@ export default function QueryWorkspacePage() {
 
   useEffect(() => {
     setUser(getStoredUser());
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      setSessionId(crypto.randomUUID());
+    }
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const qParam = sp.get("q");
+      const sqlParam = sp.get("sql");
+      if (qParam) setQuestion(qParam);
+      if (sqlParam) {
+        setManualSql(sqlParam);
+        setShowManualSql(true);
+      }
+    }
     api
-      .schema()
+      .connections()
+      .then((conns) => {
+        setConnections(conns);
+        const firstId = conns[0]?.id || "";
+        setConnectionId(firstId);
+        return api.schema(firstId || undefined);
+      })
       .then((res) => setExamples(res.examples))
-      .catch(() => {});
+      .catch(() => {
+        api
+          .schema()
+          .then((res) => setExamples(res.examples))
+          .catch(() => {});
+      });
   }, []);
 
   async function submitQuestion(qText: string, preferredMetric?: string) {
@@ -52,12 +96,25 @@ export default function QueryWorkspacePage() {
     try {
       const resp = await api.askQuery({
         question: qText,
+        connection_id: connectionId || undefined,
         preferred_metric: preferredMetric,
         clarify_ambiguity: clarifyMode,
+        session_id: sessionId || undefined,
+        conversation_history: turnHistory.slice(-4),
       });
       setResult(resp);
       if (resp.generated_sql) {
         setManualSql(resp.generated_sql);
+      }
+      if (resp.validation_status === "validation_passed") {
+        setTurnHistory((prev) => [
+          ...prev.slice(-3),
+          {
+            question: qText,
+            sql: resp.generated_sql,
+            explanation: resp.explanation,
+          },
+        ]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query execution failed");
@@ -69,7 +126,7 @@ export default function QueryWorkspacePage() {
   async function handleValidateManualSql() {
     setError(null);
     try {
-      const report = await api.validateSql(manualSql);
+      const report = await api.validateSql(manualSql, undefined, connectionId || undefined);
       setManualReport(report);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Validation failed");
@@ -82,7 +139,9 @@ export default function QueryWorkspacePage() {
     try {
       const resp = await api.executeValidatedSql(
         manualSql,
-        question || "Manual validated SQL query"
+        question || "Manual validated SQL query",
+        undefined,
+        connectionId || undefined
       );
       setResult(resp);
     } catch (err) {
@@ -135,26 +194,91 @@ export default function QueryWorkspacePage() {
   async function handlePinToDashboard() {
     if (!result || !result.chart_spec) return;
     setActionMsg(null);
+    setNewDashboardTitle(`Analytics: ${result.question.slice(0, 48)}`);
+    setPinOpen(true);
     try {
-      await api.createDashboard({
-        title: `Analytics: ${result.question.slice(0, 48)}`,
-        description: `Pinned from verified query ${result.query_id}`,
-        is_shared: true,
-        widgets: [
-          {
-            title: result.question,
-            question: result.question,
-            sql_text: result.generated_sql,
-            chart_type: result.chart_spec.recommended_type,
-            columns: result.columns,
-            rows: result.rows,
-            query_id: result.query_id,
-          },
-        ],
-      });
-      setActionMsg("Created dashboard widget from verified query output.");
+      const list = await api.dashboards();
+      setDashboards(list);
+      if (list.length > 0) {
+        setTargetDashboardId(list[0].id);
+        setPinMode("existing");
+      } else {
+        setPinMode("new");
+      }
+    } catch {
+      setPinMode("new");
+    }
+  }
+
+  async function handleConfirmPin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!result || !result.chart_spec) return;
+    setPinning(true);
+    setError(null);
+    setActionMsg(null);
+    const widget = {
+      title: result.question,
+      question: result.question,
+      sql_text: result.generated_sql,
+      connection_id: connectionId || undefined,
+      chart_type: result.chart_spec.recommended_type,
+      chart_spec: result.chart_spec,
+      result_summary: result.result_summary || undefined,
+      columns: result.columns,
+      rows: result.rows,
+      query_id: result.query_id,
+      refreshed_at: new Date().toISOString(),
+    };
+    try {
+      if (pinMode === "existing" && targetDashboardId) {
+        const updated = await api.addDashboardWidget(targetDashboardId, widget);
+        setActionMsg(`Added widget to dashboard "${updated.title}".`);
+      } else {
+        const created = await api.createDashboard({
+          title: newDashboardTitle.trim() || `Analytics: ${result.question.slice(0, 48)}`,
+          description: `Pinned from verified query ${result.query_id}`,
+          is_shared: true,
+          widgets: [widget],
+        });
+        setActionMsg(`Created dashboard "${created.title}" with verified widget.`);
+      }
+      setPinOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed creating dashboard widget");
+      setError(err instanceof Error ? err.message : "Failed pinning dashboard widget");
+    } finally {
+      setPinning(false);
+    }
+  }
+
+  async function handleProposeAction() {
+    if (!result || !result.insight_report) return;
+    setError(null);
+    setActionMsg(null);
+    try {
+      const obsSummary = result.insight_report.observations.slice(0, 2).join(" ");
+      const prop = await api.createActionProposal({
+        source_query_id: result.query_id,
+        title: `Action from query: ${result.question.slice(0, 80)}`,
+        rationale:
+          obsSummary ||
+          `Proposed from verified query ${result.query_id} (${result.rows.length} rows).`,
+        evidence_json: {
+          source_query_id: result.query_id,
+          question: result.question,
+          validated_sql: result.validated_sql,
+          observations: result.insight_report.observations,
+          row_count: result.rows.length,
+        },
+        payload_json: {
+          question: result.question,
+          sample_rows: result.rows.slice(0, 5),
+        },
+      });
+      setActionMsg(
+        `Created pending action proposal "${prop.title}" (${prop.id.slice(0, 8)}). Review & approve in Action Center.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed proposing action");
     }
   }
 
@@ -173,22 +297,54 @@ export default function QueryWorkspacePage() {
             }}
             className="space-y-3"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label
                 htmlFor="nl-question-input"
                 className="text-xs font-semibold uppercase tracking-wider text-slate-600"
               >
                 Ask an Enterprise Analytics Question
               </label>
-              <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={clarifyMode}
-                  onChange={(e) => setClarifyMode(e.target.checked)}
-                  className="rounded border-slate-300"
-                />
-                Strict Ambiguity Disambiguation
-              </label>
+              <div className="flex flex-wrap items-center gap-3">
+                {connections.length > 0 && (
+                  <select
+                    aria-label="Target Database Connection"
+                    value={connectionId}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setConnectionId(next);
+                      api
+                        .schema(next || undefined)
+                        .then((res) => setExamples(res.examples))
+                        .catch(() => {});
+                    }}
+                    className="px-2.5 py-1 rounded-md border border-slate-300 text-xs bg-white text-slate-700"
+                  >
+                    {connections.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({c.database_name})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={clarifyMode}
+                    onChange={(e) => setClarifyMode(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  Strict Ambiguity Disambiguation
+                </label>
+                {turnHistory.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setTurnHistory([])}
+                    className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 text-[11px] font-medium text-sky-800 hover:bg-sky-100 cursor-pointer"
+                  >
+                    Session Context ({turnHistory.length}) · Clear
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-2.5">
@@ -437,12 +593,86 @@ export default function QueryWorkspacePage() {
                 insight={result.insight_report}
                 onSaveQuery={handleSaveQuery}
                 onAddToDashboard={handlePinToDashboard}
+                onProposeAction={handleProposeAction}
                 onFollowUp={(nextQ) => {
                   setQuestion(nextQ);
                   submitQuestion(nextQ, "net_revenue");
                 }}
                 saving={saving}
               />
+            )}
+
+            {pinOpen && (
+              <form
+                onSubmit={handleConfirmPin}
+                className="bg-white rounded-xl border border-sky-200 shadow-xs p-4 space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Pin Verified Query to Dashboard
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setPinOpen(false)}
+                    className="text-xs text-slate-500 hover:text-slate-800 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-4 text-xs">
+                  {dashboards.length > 0 && (
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="pinMode"
+                        checked={pinMode === "existing"}
+                        onChange={() => setPinMode("existing")}
+                      />
+                      Add to Existing Dashboard
+                    </label>
+                  )}
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="pinMode"
+                      checked={pinMode === "new"}
+                      onChange={() => setPinMode("new")}
+                    />
+                    Create New Dashboard
+                  </label>
+                </div>
+                {pinMode === "existing" && dashboards.length > 0 ? (
+                  <select
+                    value={targetDashboardId}
+                    onChange={(e) => setTargetDashboardId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs bg-white"
+                  >
+                    {dashboards.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.title} ({Array.isArray(d.widgets) ? d.widgets.length : 0} widget(s))
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    required
+                    value={newDashboardTitle}
+                    onChange={(e) => setNewDashboardTitle(e.target.value)}
+                    placeholder="New dashboard title"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs"
+                  />
+                )}
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={pinning}
+                    className="px-4 py-1.5 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 disabled:opacity-60 cursor-pointer"
+                  >
+                    {pinning ? "Pinning..." : "Confirm Pin Widget"}
+                  </button>
+                </div>
+              </form>
             )}
 
             {/* Chart Visualization */}

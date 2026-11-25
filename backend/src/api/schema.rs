@@ -1,6 +1,9 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -10,13 +13,18 @@ use crate::{
     db::app_db::{load_active_connection_params, record_audit_event},
     error::AppError,
     schema::{
-        discovery::{load_latest_schema_or_refresh, refresh_and_persist_schema},
+        discovery::{load_latest_schema_or_refresh_with_adapter, refresh_and_persist_schema_with_adapter},
         linker::{filter_catalog_for_policy, generate_schema_examples},
         ManualRelationshipInput, SchemaCatalog,
     },
     semantic::list_active_metrics,
     state::AppState,
 };
+
+#[derive(Deserialize)]
+pub struct SchemaQueryParams {
+    pub connection_id: Option<Uuid>,
+}
 
 #[derive(Serialize)]
 pub struct SchemaResponse {
@@ -27,11 +35,23 @@ pub struct SchemaResponse {
 pub async fn get_schema(
     State(state): State<AppState>,
     user: AuthUser,
+    Query(params): Query<SchemaQueryParams>,
 ) -> Result<Json<SchemaResponse>, AppError> {
-    let conn_params =
-        load_active_connection_params(&state.app_pool, user.tenant_id, None, &state.cipher).await?;
-    let catalog =
-        load_latest_schema_or_refresh(&state.app_pool, user.tenant_id, &conn_params).await?;
+    let conn_params = load_active_connection_params(
+        &state.app_pool,
+        user.tenant_id,
+        params.connection_id,
+        &state.cipher,
+    )
+    .await?;
+    let adapter = state.analytics_adapter(&conn_params).await?;
+    let catalog = load_latest_schema_or_refresh_with_adapter(
+        &state.app_pool,
+        user.tenant_id,
+        &conn_params,
+        &adapter,
+    )
+    .await?;
     let filtered = filter_catalog_for_policy(&catalog, &user.policy);
     let semantics = list_active_metrics(&state.app_pool, user.tenant_id).await?;
     let examples = generate_schema_examples(&filtered, &semantics);
@@ -44,6 +64,7 @@ pub async fn get_schema(
 pub async fn refresh_schema(
     State(state): State<AppState>,
     user: AuthUser,
+    Query(params): Query<SchemaQueryParams>,
 ) -> Result<Json<SchemaResponse>, AppError> {
     if !user.policy.allow_schema_refresh {
         record_audit_event(
@@ -64,10 +85,21 @@ pub async fn refresh_schema(
         )));
     }
 
-    let conn_params =
-        load_active_connection_params(&state.app_pool, user.tenant_id, None, &state.cipher).await?;
-    let catalog =
-        refresh_and_persist_schema(&state.app_pool, user.tenant_id, &conn_params).await?;
+    let conn_params = load_active_connection_params(
+        &state.app_pool,
+        user.tenant_id,
+        params.connection_id,
+        &state.cipher,
+    )
+    .await?;
+    let adapter = state.analytics_adapter(&conn_params).await?;
+    let catalog = refresh_and_persist_schema_with_adapter(
+        &state.app_pool,
+        user.tenant_id,
+        &conn_params,
+        &adapter,
+    )
+    .await?;
     let filtered = filter_catalog_for_policy(&catalog, &user.policy);
     let semantics = list_active_metrics(&state.app_pool, user.tenant_id).await?;
     let examples = generate_schema_examples(&filtered, &semantics);
@@ -180,7 +212,15 @@ pub async fn add_manual_relationship(
     .await
     .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-    let _ = refresh_and_persist_schema(&state.app_pool, user.tenant_id, &conn_params).await;
+    if let Ok(adapter) = state.analytics_adapter(&conn_params).await {
+        let _ = refresh_and_persist_schema_with_adapter(
+            &state.app_pool,
+            user.tenant_id,
+            &conn_params,
+            &adapter,
+        )
+        .await;
+    }
 
     record_audit_event(
         &state.app_pool,

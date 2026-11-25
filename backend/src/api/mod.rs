@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod admin;
 pub mod audit;
 pub mod auth;
@@ -30,12 +31,14 @@ pub fn build_router(state: AppState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
+        .allow_credentials(true)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::COOKIE]);
 
     let api_v1 = Router::new()
         .route("/health", get(health::health_check))
         .route("/auth/login", post(auth::login))
+        .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/overview", get(overview::get_overview))
         .route("/queries/ask", post(queries::ask_question))
@@ -65,6 +68,14 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/dashboards/{id}", delete(dashboards::delete_dashboard))
         .route(
+            "/dashboards/{id}/widgets",
+            post(dashboards::add_dashboard_widget),
+        )
+        .route(
+            "/dashboards/{id}/refresh",
+            post(dashboards::refresh_dashboard),
+        )
+        .route(
             "/connections",
             get(connections::list_connections).post(connections::create_connection),
         )
@@ -75,9 +86,44 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/providers/{id}/activate", post(providers::activate_provider))
         .route("/admin/users", get(admin::list_users))
+        .route("/admin/users/{id}", put(admin::update_user))
         .route("/admin/rbac", get(admin::list_rbac_policies))
         .route("/admin/rbac/{role}", put(admin::update_rbac_policy))
-        .route("/audit", get(audit::list_audit_logs));
+        .route("/audit", get(audit::list_audit_logs))
+        .route(
+            "/actions/connectors",
+            get(actions::list_connectors).post(actions::create_connector),
+        )
+        .route(
+            "/actions/connectors/{id}",
+            delete(actions::delete_connector),
+        )
+        .route(
+            "/actions/rules",
+            get(actions::list_rules).post(actions::create_rule),
+        )
+        .route(
+            "/actions/rules/{id}/evaluate",
+            post(actions::evaluate_rule),
+        )
+        .route("/actions/rules/{id}", delete(actions::delete_rule))
+        .route(
+            "/actions/proposals",
+            get(actions::list_proposals).post(actions::create_proposal),
+        )
+        .route(
+            "/actions/proposals/{id}/approve",
+            post(actions::approve_proposal),
+        )
+        .route(
+            "/actions/proposals/{id}/reject",
+            post(actions::reject_proposal),
+        )
+        .route(
+            "/actions/proposals/{id}/execute",
+            post(actions::execute_proposal),
+        )
+        .route("/actions/executions", get(actions::list_executions));
 
     Router::new()
         .nest("/api/v1", api_v1)

@@ -71,12 +71,7 @@ async fn build_test_state() -> (AppState, AuthUser) {
     };
 
     (
-        AppState {
-            config,
-            app_pool,
-            jwt,
-            cipher,
-        },
+        AppState::new(config, app_pool, jwt, cipher),
         user,
     )
 }
@@ -106,6 +101,8 @@ async fn enterprise_business_questions_execute_end_to_end_against_live_postgres(
                 preferred_metric: None,
                 clarify_ambiguity: true,
                 requested_row_limit: None,
+                session_id: None,
+                conversation_history: vec![],
             },
         )
         .await
@@ -162,6 +159,8 @@ async fn ambiguous_missing_and_prompt_injection_questions_are_handled_safely() {
             preferred_metric: None,
             clarify_ambiguity: true,
             requested_row_limit: None,
+            session_id: None,
+            conversation_history: vec![],
         },
     )
     .await
@@ -180,6 +179,8 @@ async fn ambiguous_missing_and_prompt_injection_questions_are_handled_safely() {
             preferred_metric: None,
             clarify_ambiguity: true,
             requested_row_limit: None,
+            session_id: None,
+            conversation_history: vec![],
         },
     )
     .await
@@ -197,6 +198,8 @@ async fn ambiguous_missing_and_prompt_injection_questions_are_handled_safely() {
             preferred_metric: None,
             clarify_ambiguity: true,
             requested_row_limit: None,
+            session_id: None,
+            conversation_history: vec![],
         },
     )
     .await
@@ -434,6 +437,7 @@ async fn openai_and_gemini_providers_work_with_configurable_models_over_http() {
             semantics: &[],
             preferred_metric: None,
             row_limit: 100,
+            conversation_history: &[],
         })
         .await
         .expect("OpenAI mock response");
@@ -452,6 +456,7 @@ async fn openai_and_gemini_providers_work_with_configurable_models_over_http() {
             semantics: &[],
             preferred_metric: None,
             row_limit: 100,
+            conversation_history: &[],
         })
         .await
         .expect("Gemini mock response");
@@ -520,4 +525,71 @@ async fn result_verification_empty_nulls_charts_and_insights_work() {
     .await;
     assert!(ins.grounded);
     assert!(!ins.limitations.is_empty());
+}
+
+#[tokio::test]
+async fn multi_turn_followup_and_dynamic_period_comparison_work() {
+    let (state, user) = build_test_state().await;
+    let session_id = uuid::Uuid::new_v4();
+
+    // Turn 1: Total net revenue last quarter
+    let turn1 = run_nl_query_pipeline(
+        &state,
+        &user,
+        QueryPipelineRequest {
+            question: "What was the total net revenue last quarter?".to_string(),
+            connection_id: None,
+            preferred_metric: None,
+            clarify_ambiguity: true,
+            requested_row_limit: None,
+            session_id: Some(session_id),
+            conversation_history: vec![],
+        },
+    )
+    .await
+    .expect("turn1");
+    assert_eq!(turn1.validation_status, "validation_passed");
+
+    // Turn 2: Short multi-turn follow-up referencing prior context ("by region")
+    let turn2 = run_nl_query_pipeline(
+        &state,
+        &user,
+        QueryPipelineRequest {
+            question: "by region".to_string(),
+            connection_id: None,
+            preferred_metric: None,
+            clarify_ambiguity: true,
+            requested_row_limit: None,
+            session_id: Some(session_id),
+            conversation_history: vec![dta_backend::llm::ConversationTurn {
+                question: turn1.question,
+                sql: turn1.generated_sql,
+                explanation: turn1.explanation,
+            }],
+        },
+    )
+    .await
+    .expect("turn2 follow-up");
+    assert_eq!(turn2.validation_status, "validation_passed");
+    assert!(!turn2.rows.is_empty());
+    assert!(turn2.generated_sql.to_lowercase().contains("region"));
+
+    // Dynamic relative period comparison (without hardcoded 2026 in question)
+    let dyn_comp = run_nl_query_pipeline(
+        &state,
+        &user,
+        QueryPipelineRequest {
+            question: "Compare net revenue across the two most recent quarters.".to_string(),
+            connection_id: None,
+            preferred_metric: Some("net_revenue".to_string()),
+            clarify_ambiguity: true,
+            requested_row_limit: None,
+            session_id: Some(session_id),
+            conversation_history: vec![],
+        },
+    )
+    .await
+    .expect("dynamic comparison");
+    assert_eq!(dyn_comp.validation_status, "validation_passed");
+    assert!(dyn_comp.generated_sql.contains("INTERVAL '6 months'"));
 }

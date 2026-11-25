@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Rust Backend (Clippy & Integration Tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres_password
+        ports:
+          - 5439:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      PGPASSWORD: ci_postgres_password
+      DTA_PG_HOST: 127.0.0.1
+      DTA_PG_PORT: 5439
+      DTA_PG_SSL_MODE: disable
+      DTA_APP_DATABASE: data_to_action_app
+      DTA_APP_DB_USER: dta_app_user
+      DTA_APP_DB_PASSWORD: ci_app_db_password_2026
+      DTA_ANALYTICS_DATABASE: data_to_action_analytics
+      DTA_READONLY_DB_USER: dta_readonly
+      DTA_READONLY_DB_PASSWORD: ci_readonly_password_2026
+      DTA_JWT_SECRET: ci-test-jwt-secret-at-least-32-characters-long
+      DTA_MASTER_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+      DTA_ALLOWED_SCHEMAS: analytics,finance
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Initialize PostgreSQL roles and databases
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE USER dta_app_user WITH PASSWORD '${DTA_APP_DB_PASSWORD}';"
+          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE USER dta_readonly WITH PASSWORD '${DTA_READONLY_DB_PASSWORD}';"
+          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE DATABASE data_to_action_app OWNER dta_app_user;"
+          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE DATABASE data_to_action_analytics;"
+          psql -h 127.0.0.1 -p 5439 -U postgres -d data_to_action_app -f sql/02_init_app_db.sql
+          psql -h 127.0.0.1 -p 5439 -U postgres -d data_to_action_analytics -f sql/01_init_analytics_db.sql
+
+      - name: Run cargo clippy
+        working-directory: backend
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run cargo test
+        working-directory: backend
+        run: cargo test -- --test-threads=1
+
+  frontend:
+    name: Next.js Frontend (TypeCheck, Vitest & Build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: TypeScript typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Run Vitest unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Run Next.js production build
+        working-directory: frontend
+        run: npm run build

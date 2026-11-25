@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
-    db::{app_db::load_active_connection_params, DatabaseAdapter, PostgresAdapter},
+    db::{app_db::load_active_connection_params, DatabaseAdapter},
     engine::pipeline::load_active_provider_config,
     error::AppError,
     schema::{discovery::load_latest_schema_or_refresh, linker::filter_catalog_for_policy},
@@ -49,7 +49,7 @@ pub async fn get_overview(
         load_active_connection_params(&state.app_pool, user.tenant_id, None, &state.cipher).await?;
     let source_db_identity = conn_params.safe_identity();
 
-    let source_db_status = match PostgresAdapter::connect(conn_params.clone()).await {
+    let source_db_status = match state.analytics_adapter(&conn_params).await {
         Ok(adapter) => adapter.health_check().await.unwrap_or_else(|e| format!("degraded: {e}")),
         Err(e) => format!("unavailable: {e}"),
     };

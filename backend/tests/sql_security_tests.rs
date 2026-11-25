@@ -230,3 +230,75 @@ fn unauthorized_schemas_tables_columns_and_functions_are_rejected() {
     biz.allowed_schemas = vec!["analytics".to_string()];
     assert!(!check("SELECT actual_amount FROM finance.department_expenses", &biz).is_valid);
 }
+
+#[test]
+fn p0_ast_hardening_subquery_scope_set_ops_json_and_csv_escape() {
+    let p = analyst_policy();
+
+    let nested_ok = check(
+        "SELECT c.company_name FROM analytics.customers c WHERE EXISTS (SELECT * FROM analytics.orders o WHERE o.customer_id = c.customer_id)",
+        &p,
+    );
+    assert!(
+        nested_ok.is_valid,
+        "Expected correlated EXISTS SELECT * on orders not to trigger customers.tax_id false positive: {:?}",
+        nested_ok.rejection_reason
+    );
+
+    let derived_ok = check(
+        "SELECT * FROM (SELECT o.order_id, o.net_amount FROM analytics.orders o) sub",
+        &p,
+    );
+    assert!(
+        derived_ok.is_valid,
+        "Expected derived table SELECT * to pass: {:?}",
+        derived_ok.rejection_reason
+    );
+
+    assert!(
+        !check(
+            "SELECT o.order_id FROM analytics.orders o WHERE EXISTS (SELECT * FROM analytics.customers c WHERE c.customer_id = o.customer_id)",
+            &p
+        )
+        .is_valid
+    );
+
+    let union_ok = check(
+        "SELECT region_id AS id FROM analytics.orders UNION ALL SELECT region_id AS id FROM analytics.regions",
+        &p,
+    );
+    assert!(union_ok.is_valid, "Expected UNION ALL to pass: {:?}", union_ok.rejection_reason);
+
+    let intersect_ok = check(
+        "SELECT region_id FROM analytics.orders INTERSECT SELECT region_id FROM analytics.regions",
+        &p,
+    );
+    assert!(intersect_ok.is_valid, "Expected INTERSECT to pass: {:?}", intersect_ok.rejection_reason);
+
+    assert!(
+        !check(
+            "SELECT company_name FROM analytics.customers UNION SELECT tax_id FROM analytics.customers",
+            &p
+        )
+        .is_valid
+    );
+
+    let at_tz = check(
+        "SELECT order_date AT TIME ZONE 'UTC' AS utc_ts FROM analytics.orders WHERE status IS DISTINCT FROM 'CANCELLED'",
+        &p,
+    );
+    assert!(at_tz.is_valid, "Expected AT TIME ZONE and IS DISTINCT FROM to pass: {:?}", at_tz.rejection_reason);
+
+    let json_expr = check(
+        "SELECT status::jsonb->>'code' AS code FROM analytics.orders",
+        &p,
+    );
+    assert!(json_expr.is_valid, "Expected JSON read operator to pass: {:?}", json_expr.rejection_reason);
+
+    assert_eq!(dta_backend::api::queries::csv_escape("=SUM(A1:A2)"), "'=SUM(A1:A2)");
+    assert_eq!(dta_backend::api::queries::csv_escape("+100+200"), "'+100+200");
+    assert_eq!(dta_backend::api::queries::csv_escape("-1+1"), "'-1+1");
+    assert_eq!(dta_backend::api::queries::csv_escape("@SUM(1+1)"), "'@SUM(1+1)");
+    assert_eq!(dta_backend::api::queries::csv_escape("=1,2"), "\"'=1,2\"");
+    assert_eq!(dta_backend::api::queries::csv_escape("North America"), "North America");
+}

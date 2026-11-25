@@ -16,7 +16,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { clearAuthSession, getStoredUser } from "@/lib/api";
+import { api, clearAuthSession, getStoredUser } from "@/lib/api";
 import type { UserProfile } from "@/lib/types";
 
 const NAV_ITEMS = [
@@ -26,6 +26,7 @@ const NAV_ITEMS = [
   { href: "/semantics", label: "Semantic Catalog", icon: BookOpen },
   { href: "/history", label: "History & Saved", icon: History },
   { href: "/dashboards", label: "Dashboard Builder", icon: LayoutDashboard },
+  { href: "/actions", label: "Action Center", icon: ShieldAlert },
   { href: "/admin", label: "Governance & RBAC", icon: ShieldCheck },
 ];
 
@@ -54,6 +55,7 @@ export function AppShell({
   }, [pathname]);
 
   function handleLogout() {
+    void api.logout().catch(() => {});
     clearAuthSession();
     router.push("/login");
   }

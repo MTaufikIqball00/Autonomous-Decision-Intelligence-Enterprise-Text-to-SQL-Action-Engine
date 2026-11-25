@@ -18,9 +18,30 @@ RULES:
 pub fn build_sql_user_prompt(req: &LlmSqlGenerationRequest<'_>) -> String {
     let schema_block = format_linked_schema(req.linked_schema);
     let semantic_block = format_semantics(req.semantics);
+    let history_block = if req.conversation_history.is_empty() {
+        "none".to_string()
+    } else {
+        req.conversation_history
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .enumerate()
+            .map(|(idx, turn)| {
+                format!(
+                    "[Turn {}] Q: {} | SQL: {}",
+                    idx + 1,
+                    turn.question.trim(),
+                    turn.sql.trim()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
-        "USER QUESTION:\n{}\n\nPREFERRED METRIC CLARIFICATION:\n{}\n\nROW LIMIT:\n{}\n\nRELEVANT VERIFIED SCHEMA CONTEXT (Version {}):\n{}\n\nAPPROVED SEMANTIC DEFINITIONS:\n{}",
+        "USER QUESTION:\n{}\n\nCONVERSATION HISTORY (PRIOR TURNS IN SESSION):\n{}\n\nPREFERRED METRIC CLARIFICATION:\n{}\n\nROW LIMIT:\n{}\n\nRELEVANT VERIFIED SCHEMA CONTEXT (Version {}):\n{}\n\nAPPROVED SEMANTIC DEFINITIONS:\n{}",
         req.question,
+        history_block,
         req.preferred_metric.unwrap_or("none"),
         req.row_limit,
         req.linked_schema.schema_version,

@@ -1,6 +1,9 @@
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts},
+    http::{
+        header::{AUTHORIZATION, COOKIE},
+        request::Parts,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -121,21 +124,35 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
+        let bearer_token = parts
             .headers
             .get(AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
-            .ok_or(AppError::Unauthorized)?;
-
-        let token = auth_header
-            .strip_prefix("Bearer ")
+            .and_then(|h| h.strip_prefix("Bearer "))
             .map(str::trim)
             .filter(|t| !t.is_empty())
+            .map(str::to_string);
+
+        let cookie_token = parts
+            .headers
+            .get(COOKIE)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|raw| {
+                raw.split(';')
+                    .map(str::trim)
+                    .find_map(|kv| kv.strip_prefix("dta_session="))
+            })
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+
+        let token = bearer_token
+            .or(cookie_token)
             .ok_or(AppError::Unauthorized)?;
 
         let claims = state
             .jwt
-            .verify_token(token)
+            .verify_token(&token)
             .map_err(|_| AppError::Unauthorized)?;
 
         // Always fetch authoritative role & RBAC policy from application DB; never trust client headers

@@ -4,10 +4,12 @@ import React, { useEffect, useState } from "react";
 import { Database, GitMerge, Key, RefreshCw, Search } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { api, getStoredUser } from "@/lib/api";
-import type { SchemaCatalog, UserProfile } from "@/lib/types";
+import type { ConnectionDto, SchemaCatalog, UserProfile } from "@/lib/types";
 
 export default function SchemaExplorerPage() {
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [connections, setConnections] = useState<ConnectionDto[]>([]);
+  const [connectionId, setConnectionId] = useState<string>("");
   const [catalog, setCatalog] = useState<SchemaCatalog | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -24,20 +26,37 @@ export default function SchemaExplorerPage() {
   const [relDesc, setRelDesc] = useState("Verified operational region join");
   const [relMsg, setRelMsg] = useState<string | null>(null);
 
+  async function loadSchemaForConnection(targetConnId?: string) {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.schema(targetConnId || undefined);
+      setCatalog(res.catalog);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed loading schema");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     setUser(getStoredUser());
     api
-      .schema()
-      .then((res) => setCatalog(res.catalog))
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed loading schema"))
-      .finally(() => setLoading(false));
+      .connections()
+      .then((conns) => {
+        setConnections(conns);
+        const initialId = conns[0]?.id || "";
+        setConnectionId(initialId);
+        return loadSchemaForConnection(initialId || undefined);
+      })
+      .catch(() => loadSchemaForConnection());
   }, []);
 
   async function handleRefresh() {
     setRefreshing(true);
     setError(null);
     try {
-      const res = await api.refreshSchema();
+      const res = await api.refreshSchema(connectionId || undefined);
       setCatalog(res.catalog);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Schema refresh failed");
@@ -105,7 +124,25 @@ export default function SchemaExplorerPage() {
             />
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {connections.length > 0 && (
+              <select
+                aria-label="Active Schema Connection"
+                value={connectionId}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setConnectionId(next);
+                  loadSchemaForConnection(next || undefined);
+                }}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs bg-white text-slate-800"
+              >
+                {connections.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.database_name})
+                  </option>
+                ))}
+              </select>
+            )}
             {catalog && (
               <span className="text-xs font-mono-tabular text-slate-500">
                 DB: {catalog.database_name} · Version v{catalog.version}

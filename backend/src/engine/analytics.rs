@@ -190,12 +190,25 @@ fn infer_aggregation_method(sql: &str) -> String {
 fn infer_time_range(sql: &str) -> String {
     let s = sql.to_lowercase();
     if s.contains("date_trunc('quarter', current_date) - interval '3 months'") {
-        "Previous full calendar quarter".to_string()
-    } else if s.contains("date '2026-04-01'") && s.contains("2026-10-01") {
-        "2026-04-01 to 2026-09-30 (Q2-Q3 2026)".to_string()
-    } else if s.contains("2026-01-01") {
-        "From 2026-01-01 to latest completed quarter".to_string()
-    } else {
-        "All available records matching query filters".to_string()
+        return "Previous full calendar quarter".to_string();
     }
+    if s.contains("date_trunc('quarter', current_date) - interval '6 months'") {
+        return "Previous two full calendar quarters".to_string();
+    }
+    if let Ok(re) = regex::Regex::new(r"date\s+'(\d{4}-\d{2}-\d{2})'") {
+        let dates: Vec<String> = re
+            .captures_iter(&s)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+        if dates.len() >= 2 {
+            return format!("{} to {} (exclusive end)", dates[0], dates[1]);
+        }
+        if dates.len() == 1 {
+            return format!("From {} to configured upper bound", dates[0]);
+        }
+    }
+    if s.contains("extract(year from") {
+        return "Multi-year period comparison".to_string();
+    }
+    "All available records matching query filters".to_string()
 }

@@ -310,10 +310,25 @@ export interface DashboardWidget {
   title: string;
   question: string;
   sql_text: string;
+  saved_query_id?: string;
+  connection_id?: string;
   chart_type: ChartKind;
+  chart_spec?: ChartRecommendation;
+  result_summary?: VerifiedResultSummary;
   columns: ColumnMeta[];
   rows: unknown[][];
   query_id?: string;
+  refreshed_at?: string;
+  refresh_error?: string;
+}
+
+export interface AdminUserDto {
+  id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
 }
 
 export interface DashboardDto {
@@ -363,4 +378,75 @@ export interface AuditLogDto {
   decision: string;
   details: Record<string, unknown>;
   created_at: string;
+}
+
+export interface ActionConnectorDto {
+  id: string;
+  name: string;
+  connector_type: "webhook" | "slack_teams" | "email_ticket_payload";
+  endpoint_url: string;
+  default_headers: Record<string, string>;
+  has_secret: boolean;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface ActionRuleDto {
+  id: string;
+  connection_id: string | null;
+  saved_query_id: string | null;
+  connector_id: string | null;
+  name: string;
+  description: string;
+  sql_text: string;
+  metric_column: string;
+  comparator: string;
+  threshold_value: number;
+  schedule_interval_secs: number;
+  is_active: boolean;
+  last_evaluated_at: string | null;
+  created_at: string;
+}
+
+export interface ActionProposalDto {
+  id: string;
+  rule_id: string | null;
+  connector_id: string | null;
+  source_query_id: string | null;
+  title: string;
+  rationale: string;
+  evidence_json: Record<string, unknown>;
+  payload_json: Record<string, unknown>;
+  status: "pending" | "approved" | "rejected" | "executed" | "failed";
+  idempotency_key: string;
+  proposed_by: string | null;
+  reviewed_by: string | null;
+  review_note: string;
+  reviewed_at: string | null;
+  executed_at: string | null;
+  created_at: string;
+}
+
+export interface ActionExecutionDto {
+  id: string;
+  proposal_id: string;
+  connector_id: string | null;
+  idempotency_key: string;
+  attempt_count: number;
+  http_status: number | null;
+  outcome: string;
+  response_summary: string;
+  executed_by: string | null;
+  created_at: string;
+}
+
+export interface RuleEvaluationSummary {
+  rule_id: string;
+  query_id: string;
+  triggered: boolean;
+  observed_value: number | null;
+  threshold_value: number;
+  comparator: string;
+  row_count: number;
+  proposal: ActionProposalDto | null;
 }

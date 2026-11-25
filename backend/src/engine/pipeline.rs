@@ -10,7 +10,7 @@ use crate::{
     auth::AuthUser,
     db::{
         app_db::{load_active_connection_params, record_audit_event},
-        ColumnMeta, DatabaseAdapter, ExecutionContext, PostgresAdapter,
+        ColumnMeta, DatabaseAdapter, ExecutionContext,
     },
     engine::{
         analytics::{select_chart_spec, ChartRecommendation},
@@ -19,8 +19,8 @@ use crate::{
     },
     error::{sanitize_error_message, AppError},
     llm::{
-        create_provider, LlmProvider, LlmSqlCorrectionRequest, LlmSqlGenerationRequest,
-        ProviderConfigRecord,
+        create_provider, ConversationTurn, LlmProvider, LlmSqlCorrectionRequest,
+        LlmSqlGenerationRequest, ProviderConfigRecord,
     },
     schema::{
         discovery::load_latest_schema_or_refresh,
@@ -40,6 +40,10 @@ pub struct QueryPipelineRequest {
     #[serde(default = "default_true")]
     pub clarify_ambiguity: bool,
     pub requested_row_limit: Option<u32>,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub conversation_history: Vec<ConversationTurn>,
 }
 
 fn default_true() -> bool {
@@ -137,8 +141,20 @@ pub async fn run_nl_query_pipeline(
         load_latest_schema_or_refresh(&state.app_pool, user.tenant_id, &conn_params).await?;
     let filtered_catalog = filter_catalog_for_policy(&raw_catalog, &user.policy);
 
+    let linking_query = if !req.conversation_history.is_empty()
+        && question.split_whitespace().count() <= 8
+    {
+        if let Some(prev) = req.conversation_history.last() {
+            format!("{} {}", prev.question, question)
+        } else {
+            question.clone()
+        }
+    } else {
+        question.clone()
+    };
+
     let linked = link_schema_for_question(
-        &question,
+        &linking_query,
         &filtered_catalog,
         &semantics,
         req.clarify_ambiguity,
@@ -157,6 +173,7 @@ pub async fn run_nl_query_pipeline(
             semantics: &semantics,
             preferred_metric: req.preferred_metric.as_deref(),
             row_limit: effective_limit,
+            conversation_history: &req.conversation_history,
         })
         .await?;
 
@@ -299,7 +316,7 @@ pub async fn run_nl_query_pipeline(
         return Ok(resp);
     }
 
-    let adapter = PostgresAdapter::connect(conn_params.clone()).await?;
+    let adapter = state.analytics_adapter(&conn_params).await?;
     let exec_ctx = ExecutionContext {
         timeout_ms: state.config.query_timeout_ms,
         row_limit: effective_limit,
@@ -773,7 +790,7 @@ pub async fn load_active_provider_config(
     })
 }
 
-async fn persist_execution(
+pub async fn persist_execution(
     state: &AppState,
     user: &AuthUser,
     connection_id: Uuid,
@@ -795,7 +812,7 @@ async fn persist_execution(
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string());
 
-    let _ = sqlx::query(
+    if let Err(err) = sqlx::query(
         r#"
         INSERT INTO query_executions (
             id, tenant_id, user_id, connection_id, question, provider_used, model_used,
@@ -828,5 +845,13 @@ async fn persist_execution(
     .bind(&resp.error_message)
     .bind(resp.created_at)
     .execute(&state.app_pool)
-    .await;
+    .await
+    {
+        tracing::warn!(
+            query_id = %resp.query_id,
+            tenant_id = %user.tenant_id,
+            error = %err,
+            "Failed to persist query_executions record"
+        );
+    }
 }

@@ -1,4 +1,11 @@
-use axum::{extract::State, Json};
+use std::time::Duration;
+
+use axum::{
+    extract::State,
+    http::{header, HeaderMap, HeaderValue},
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
@@ -37,10 +44,19 @@ pub struct LoginResponse {
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let email = req.email.trim().to_lowercase();
     if email.is_empty() || req.password.is_empty() {
         return Err(AppError::BadRequest("Email and password are required.".to_string()));
+    }
+
+    let rate_key = format!("login:{email}");
+    if let Err(retry_after_secs) = state
+        .rate_limiter
+        .check_and_record(&rate_key, state.config.login_rate_limit_per_min, Duration::from_secs(60))
+        .await
+    {
+        return Err(AppError::RateLimited { retry_after_secs });
     }
 
     let row = sqlx::query(
@@ -123,18 +139,38 @@ pub async fn login(
         region_filter: r.get("region_filter"),
     };
 
-    Ok(Json(LoginResponse {
-        token,
-        user: UserProfileDto {
-            user_id,
-            tenant_id,
-            tenant_slug: r.get("tenant_slug"),
-            email,
-            display_name: r.get("display_name"),
-            role: role_str,
-            policy,
-        },
-    }))
+    let mut headers = HeaderMap::new();
+    let cookie_val = format!(
+        "dta_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200"
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
+        headers.insert(header::SET_COOKIE, hv);
+    }
+
+    Ok((
+        headers,
+        Json(LoginResponse {
+            token,
+            user: UserProfileDto {
+                user_id,
+                tenant_id,
+                tenant_slug: r.get("tenant_slug"),
+                email,
+                display_name: r.get("display_name"),
+                role: role_str,
+                policy,
+            },
+        }),
+    ))
+}
+
+pub async fn logout() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static("dta_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+    );
+    (headers, Json(json!({ "ok": true })))
 }
 
 pub async fn me(user: AuthUser) -> Json<UserProfileDto> {

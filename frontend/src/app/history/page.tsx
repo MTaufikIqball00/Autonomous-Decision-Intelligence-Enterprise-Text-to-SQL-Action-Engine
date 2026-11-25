@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Bookmark, History, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { Bookmark, History, Play, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { SecurityStateBadge } from "@/components/SecurityStateBadge";
 import { api } from "@/lib/api";
@@ -67,14 +68,23 @@ export default function HistoryAndSavedPage() {
                       <div className="text-sm font-semibold text-slate-900">{item.title}</div>
                       <div className="text-xs text-slate-500">{item.question}</div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteSaved(item.id)}
-                      aria-label={`Delete saved query ${item.title}`}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/query?q=${encodeURIComponent(item.question)}&sql=${encodeURIComponent(item.sql_text)}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100"
+                      >
+                        <Play className="h-3 w-3" />
+                        Open in Workspace
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSaved(item.id)}
+                        aria-label={`Delete saved query ${item.title}`}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                   <pre className="p-2.5 rounded bg-slate-950 text-sky-200 text-[11px] font-mono-tabular overflow-x-auto">
                     <code>{item.sql_text}</code>
@@ -102,10 +112,21 @@ export default function HistoryAndSavedPage() {
                 <div key={h.query_id} className="p-4 space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-sm font-medium text-slate-900">{h.question}</div>
-                    <SecurityStateBadge
-                      validationStatus={h.validation_status}
-                      executionStatus={h.execution_status as VerifiedExecutionStatus}
-                    />
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/query?q=${encodeURIComponent(h.question)}${
+                          h.generated_sql ? `&sql=${encodeURIComponent(h.generated_sql)}` : ""
+                        }`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200"
+                      >
+                        <Play className="h-3 w-3" />
+                        Re-open
+                      </Link>
+                      <SecurityStateBadge
+                        validationStatus={h.validation_status}
+                        executionStatus={h.execution_status as VerifiedExecutionStatus}
+                      />
+                    </div>
                   </div>
                   <div className="text-[11px] font-mono-tabular text-slate-500">
                     ID: {h.query_id} · Planner: {h.provider_used}/{h.model_used} · Schema v{h.schema_version} ·{" "}

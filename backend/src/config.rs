@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub max_result_bytes: usize,
     pub query_timeout_ms: u64,
     pub self_correction_max_retries: u32,
+    pub login_rate_limit_per_min: u32,
+    pub query_rate_limit_per_min: u32,
     pub openai_api_key: Option<String>,
     pub openai_model: Option<String>,
     pub openai_base_url: String,
@@ -87,6 +89,12 @@ impl AppConfig {
         let self_correction_max_retries = env_or("DTA_SELF_CORRECTION_MAX_RETRIES", "2")
             .parse::<u32>()
             .map_err(|e| format!("Invalid DTA_SELF_CORRECTION_MAX_RETRIES: {e}"))?;
+        let login_rate_limit_per_min = env_or("DTA_LOGIN_RATE_LIMIT", "30")
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid DTA_LOGIN_RATE_LIMIT: {e}"))?;
+        let query_rate_limit_per_min = env_or("DTA_QUERY_RATE_LIMIT", "60")
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid DTA_QUERY_RATE_LIMIT: {e}"))?;
 
         Ok(Self {
             pg_host,
@@ -108,6 +116,8 @@ impl AppConfig {
             max_result_bytes,
             query_timeout_ms,
             self_correction_max_retries,
+            login_rate_limit_per_min,
+            query_rate_limit_per_min,
             openai_api_key: env_opt("OPENAI_API_KEY"),
             openai_model: env_opt("OPENAI_MODEL"),
             openai_base_url: env_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),

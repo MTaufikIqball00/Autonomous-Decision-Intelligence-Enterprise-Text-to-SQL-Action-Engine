@@ -189,3 +189,75 @@ pub async fn update_rbac_policy(
         region_filter: row.get("region_filter"),
     }))
 }
+
+#[derive(Deserialize)]
+pub struct UpdateUserRequest {
+    pub role: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+pub async fn update_user(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateUserRequest>,
+) -> Result<Json<AdminUserDto>, AppError> {
+    if !user.policy.allow_admin_config {
+        return Err(AppError::Forbidden(
+            "Only Administrators can update tenant user accounts.".to_string(),
+        ));
+    }
+
+    if id == user.user_id && req.is_active == Some(false) {
+        return Err(AppError::BadRequest(
+            "Administrators cannot deactivate their own active account.".to_string(),
+        ));
+    }
+
+    let role_opt = match &req.role {
+        Some(r) => Some(Role::parse(r)?.as_str().to_string()),
+        None => None,
+    };
+
+    let row = sqlx::query(
+        r#"
+        UPDATE users
+        SET role = COALESCE($3, role),
+            is_active = COALESCE($4, is_active)
+        WHERE id = $1 AND tenant_id = $2
+        RETURNING id, email, display_name, role, is_active, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(user.tenant_id)
+    .bind(&role_opt)
+    .bind(req.is_active)
+    .fetch_optional(&state.app_pool)
+    .await
+    .map_err(|e| AppError::DatabaseError(e.to_string()))?
+    .ok_or_else(|| AppError::NotFound("Tenant user not found.".to_string()))?;
+
+    let updated = AdminUserDto {
+        id: row.get("id"),
+        email: row.get("email"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        is_active: row.get("is_active"),
+        created_at: row.get("created_at"),
+    };
+
+    record_audit_event(
+        &state.app_pool,
+        user.tenant_id,
+        Some(user.user_id),
+        &user.email,
+        "user_admin_update",
+        "user",
+        &id.to_string(),
+        "allowed",
+        json!({"target_email": updated.email, "role": updated.role, "is_active": updated.is_active}),
+    )
+    .await;
+
+    Ok(Json(updated))
+}

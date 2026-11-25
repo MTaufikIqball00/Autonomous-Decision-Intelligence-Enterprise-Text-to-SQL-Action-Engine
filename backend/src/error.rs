@@ -36,6 +36,9 @@ pub enum AppError {
     #[error("Query execution timed out")]
     Timeout,
 
+    #[error("Rate limit exceeded. Retry after {retry_after_secs} seconds.")]
+    RateLimited { retry_after_secs: u64 },
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -78,6 +81,20 @@ impl IntoResponse for AppError {
                 "execution_timeout",
                 self.to_string(),
             ),
+            AppError::RateLimited { retry_after_secs } => {
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorBody {
+                        error: self.to_string(),
+                        code: "rate_limited",
+                    }),
+                )
+                    .into_response();
+                if let Ok(val) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+                    resp.headers_mut().insert(axum::http::header::RETRY_AFTER, val);
+                }
+                return resp;
+            }
             AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

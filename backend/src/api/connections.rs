@@ -12,7 +12,7 @@ use crate::{
     auth::AuthUser,
     db::{
         app_db::{load_active_connection_params, record_audit_event},
-        BigQueryAdapterStub, DatabaseAdapter, PostgresAdapter,
+        BigQueryAdapterStub, DatabaseAdapter,
     },
     error::AppError,
     state::AppState,
@@ -153,6 +153,8 @@ pub async fn create_connection(
     .await
     .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+    state.invalidate_analytics_pool(id).await;
+
     record_audit_event(
         &state.app_pool,
         user.tenant_id,
@@ -199,7 +201,8 @@ pub async fn test_connection(
         stub.health_check().await?;
     }
 
-    let adapter = PostgresAdapter::connect(params.clone()).await?;
+    state.invalidate_analytics_pool(id).await;
+    let adapter = state.analytics_adapter(&params).await?;
     let status = adapter.health_check().await?;
     Ok(Json(json!({
         "connection_id": id,

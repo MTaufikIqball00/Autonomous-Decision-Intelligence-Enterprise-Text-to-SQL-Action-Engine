@@ -1,19 +1,21 @@
 "use client";
 
 import React from "react";
-import { BookmarkPlus, CheckCircle2, Info, LayoutGrid, Lightbulb, MessageSquarePlus } from "lucide-react";
+import { BookmarkPlus, CheckCircle2, Info, LayoutGrid, Lightbulb, MessageSquarePlus, ShieldAlert } from "lucide-react";
 import type { InsightReport } from "@/lib/types";
 
 export function InsightPanel({
   insight,
   onSaveQuery,
   onAddToDashboard,
+  onProposeAction,
   onFollowUp,
   saving,
 }: {
   insight: InsightReport;
   onSaveQuery?: () => void;
   onAddToDashboard?: () => void;
+  onProposeAction?: () => void;
   onFollowUp?: (prompt: string) => void;
   saving?: boolean;
 }) {
@@ -53,10 +55,20 @@ export function InsightPanel({
               Pin to Dashboard
             </button>
           )}
+          {onProposeAction && (
+            <button
+              type="button"
+              onClick={onProposeAction}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-amber-600 text-white hover:bg-amber-700 cursor-pointer"
+            >
+              <ShieldAlert className="h-3.5 w-3.5" />
+              Propose Action
+            </button>
+          )}
           {onFollowUp && (
             <button
               type="button"
-              onClick={() => onFollowUp("Compare net revenue between Q2 2026 and Q3 2026.")}
+              onClick={() => onFollowUp("Compare net revenue across the two most recent quarters.")}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
             >
               <MessageSquarePlus className="h-3.5 w-3.5" />

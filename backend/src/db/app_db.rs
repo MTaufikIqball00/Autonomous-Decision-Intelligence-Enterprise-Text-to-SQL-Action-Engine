@@ -368,6 +368,7 @@ pub async fn bootstrap_app_database(
     Ok((tenant_id, connection_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn record_audit_event(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -379,7 +380,7 @@ pub async fn record_audit_event(
     decision: &str,
     details: serde_json::Value,
 ) {
-    let _ = sqlx::query(
+    if let Err(err) = sqlx::query(
         r#"
         INSERT INTO audit_logs (id, tenant_id, user_id, user_email, event_type, resource_type, resource_id, decision, details)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -395,7 +396,16 @@ pub async fn record_audit_event(
     .bind(decision)
     .bind(details)
     .execute(pool)
-    .await;
+    .await
+    {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            event_type = event_type,
+            resource_id = resource_id,
+            error = %err,
+            "Failed to persist audit_logs event"
+        );
+    }
 }
 
 pub async fn load_active_connection_params(

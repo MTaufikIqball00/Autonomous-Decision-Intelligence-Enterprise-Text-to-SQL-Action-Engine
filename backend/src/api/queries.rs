@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -14,9 +16,11 @@ use crate::{
     auth::{AuthUser, Role},
     db::{
         app_db::{load_active_connection_params, record_audit_event},
-        DatabaseAdapter, ExecutionContext, PostgresAdapter,
+        DatabaseAdapter, ExecutionContext,
     },
-    engine::pipeline::{run_nl_query_pipeline, QueryPipelineRequest, QueryPipelineResponse},
+    engine::pipeline::{
+        persist_execution, run_nl_query_pipeline, QueryPipelineRequest, QueryPipelineResponse,
+    },
     error::AppError,
     schema::{discovery::load_latest_schema_or_refresh, linker::filter_catalog_for_policy},
     sql_validator::validate_sql,
@@ -28,6 +32,14 @@ pub async fn ask_question(
     user: AuthUser,
     Json(req): Json<QueryPipelineRequest>,
 ) -> Result<Json<QueryPipelineResponse>, AppError> {
+    let key = format!("query:{}", user.user_id);
+    if let Err(retry_after_secs) = state
+        .rate_limiter
+        .check_and_record(&key, state.config.query_rate_limit_per_min, Duration::from_secs(60))
+        .await
+    {
+        return Err(AppError::RateLimited { retry_after_secs });
+    }
     let resp = run_nl_query_pipeline(&state, &user, req).await?;
     Ok(Json(resp))
 }
@@ -190,7 +202,7 @@ pub async fn export_csv(
         ));
     }
 
-    let adapter = PostgresAdapter::connect(conn_params).await?;
+    let adapter = state.analytics_adapter(&conn_params).await?;
     let exec_ctx = ExecutionContext {
         timeout_ms: state.config.query_timeout_ms,
         row_limit: user.policy.row_limit,
@@ -249,6 +261,7 @@ pub async fn export_csv(
 pub struct ValidateSqlRequest {
     pub sql: String,
     pub requested_row_limit: Option<u32>,
+    pub connection_id: Option<Uuid>,
 }
 
 pub async fn validate_sql_preview(
@@ -256,8 +269,13 @@ pub async fn validate_sql_preview(
     user: AuthUser,
     Json(req): Json<ValidateSqlRequest>,
 ) -> Result<Json<crate::sql_validator::ValidationReport>, AppError> {
-    let conn_params =
-        load_active_connection_params(&state.app_pool, user.tenant_id, None, &state.cipher).await?;
+    let conn_params = load_active_connection_params(
+        &state.app_pool,
+        user.tenant_id,
+        req.connection_id,
+        &state.cipher,
+    )
+    .await?;
     let catalog =
         load_latest_schema_or_refresh(&state.app_pool, user.tenant_id, &conn_params).await?;
     let filtered_catalog = filter_catalog_for_policy(&catalog, &user.policy);
@@ -293,6 +311,7 @@ pub struct ExecuteValidatedSqlRequest {
     pub sql: String,
     pub question: Option<String>,
     pub requested_row_limit: Option<u32>,
+    pub connection_id: Option<Uuid>,
 }
 
 pub async fn execute_validated_sql(
@@ -300,8 +319,13 @@ pub async fn execute_validated_sql(
     user: AuthUser,
     Json(req): Json<ExecuteValidatedSqlRequest>,
 ) -> Result<Json<QueryPipelineResponse>, AppError> {
-    let conn_params =
-        load_active_connection_params(&state.app_pool, user.tenant_id, None, &state.cipher).await?;
+    let conn_params = load_active_connection_params(
+        &state.app_pool,
+        user.tenant_id,
+        req.connection_id,
+        &state.cipher,
+    )
+    .await?;
     if !user.policy.is_database_allowed(&conn_params.database_name) {
         return Err(AppError::Forbidden(format!(
             "Role '{}' is not authorized to query database '{}'.",
@@ -345,7 +369,7 @@ pub async fn execute_validated_sql(
             .rejection_reason
             .clone()
             .unwrap_or_else(|| "SQL rejected by AST validator.".to_string());
-        return Ok(Json(QueryPipelineResponse {
+        let resp = QueryPipelineResponse {
             query_id,
             question,
             provider_used: "manual_sql_validator".to_string(),
@@ -373,11 +397,13 @@ pub async fn execute_validated_sql(
             cannot_compute_reason: None,
             error_message: Some(rej),
             created_at,
-        }));
+        };
+        persist_execution(&state, &user, conn_params.id, &resp).await;
+        return Ok(Json(resp));
     }
 
     let exec_sql = report.executable_sql.clone().unwrap_or_default();
-    let adapter = PostgresAdapter::connect(conn_params).await?;
+    let adapter = state.analytics_adapter(&conn_params).await?;
     let exec_ctx = ExecutionContext {
         timeout_ms: state.config.query_timeout_ms,
         row_limit: report.applied_row_limit,
@@ -406,7 +432,7 @@ pub async fn execute_validated_sql(
     )
     .await;
 
-    Ok(Json(QueryPipelineResponse {
+    let resp = QueryPipelineResponse {
         query_id,
         question,
         provider_used: "manual_sql_validator".to_string(),
@@ -434,13 +460,48 @@ pub async fn execute_validated_sql(
         cannot_compute_reason: None,
         error_message: None,
         created_at,
-    }))
+    };
+
+    persist_execution(&state, &user, conn_params.id, &resp).await;
+    record_audit_event(
+        &state.app_pool,
+        user.tenant_id,
+        Some(user.user_id),
+        &user.email,
+        "query_execution",
+        "query",
+        &query_id.to_string(),
+        "completed",
+        json!({
+            "mode": "manual",
+            "connection_id": conn_params.id,
+            "rows": resp.rows.len(),
+        }),
+    )
+    .await;
+
+    Ok(Json(resp))
 }
 
-fn csv_escape(val: &str) -> String {
-    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
-        format!("\"{}\"", val.replace('"', "\"\""))
+pub fn csv_escape(val: &str) -> String {
+    // Guard against CSV / spreadsheet formula injection when cells start with =, +, -, @, tab, or CR.
+    let safe_val = if val
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{val}")
     } else {
         val.to_string()
+    };
+
+    if safe_val.contains(',')
+        || safe_val.contains('"')
+        || safe_val.contains('\n')
+        || safe_val.contains('\r')
+    {
+        format!("\"{}\"", safe_val.replace('"', "\"\""))
+    } else {
+        safe_val
     }
 }

@@ -1,85 +1,102 @@
-# DATA-TO-ACTION — Enterprise Text-to-SQL & Analytics Agent
+# DATA-TO-ACTION — Agen Analitik Enterprise Text-to-SQL & Action Engine
 
-> **English** | [Bahasa Indonesia (README.id.md)](README.id.md) | [Apache-2.0 License](LICENSE)
+> **Bahasa Indonesia** | [README.id.md](README.id.md) | [Lisensi Apache 2.0](LICENSE)
 
-**DATA-TO-ACTION** is a standalone, security-first enterprise analytics platform built with a **Rust (`axum`, `tokio`, `sqlx`, `sqlparser`)** backend, **PostgreSQL 17.12.0** (strictly separated application metadata and read-only analytics databases), and a **Next.js + Tailwind CSS v4** analytical workspace.
+**DATA-TO-ACTION** adalah platform analitik dan *Autonomous Decision Intelligence* enterprise berbasis **Natural Language to SQL (Text-to-SQL) & Action Engine** yang aman secara desain (*secure-by-design*), bersifat **read-only** pada lapisan eksekusi data, dapat diaudit (*auditable*), dan berbasis bukti nyata (*evidence-based*).
 
-## Deskripsi Singkat (Bahasa Indonesia)
+Dibangun dengan backend **Rust (`axum`, `tokio`, `sqlx`, `sqlparser`)**, **PostgreSQL `17.12.0`** (pemisahan tegas antara basis data metadata aplikasi dan basis data analitik read-only), serta frontend **Next.js 16 + Tailwind CSS v4**.
 
-**DATA-TO-ACTION** adalah platform analitik enterprise Text-to-SQL yang aman secara desain, bersifat **read-only**, dapat diaudit, dan berbasis bukti nyata. Pengguna bisnis dapat mengajukan pertanyaan dalam bahasa natural, melakukan penautan skema otomatis berbasis metadata PostgreSQL aktual, memvalidasi keamanan SQL secara deterministik melalui AST (`sqlparser`), mengeksekusi kueri pada peran read-only, serta menampilkan tabel, grafik interaktif, dan wawasan bisnis yang terverifikasi.
+> **Deskripsi Repositori GitHub:**
+> `Platform analitik Enterprise Text-to-SQL & Autonomous Action Engine — aman secara desain dengan Rust (Axum/SQLx/sqlparser AST), PostgreSQL read-only + RLS, Live Dashboards, Human-in-the-Loop Action Center, dan Next.js + Tailwind CSS v4.`
 
-> **Suggested GitHub Repository Description:**
-> `Enterprise Text-to-SQL & Data-to-Action analytics platform — secure-by-design Rust (Axum/SQLx/sqlparser AST), read-only PostgreSQL with RLS, schema linking, semantic catalog, and Next.js + Tailwind CSS v4.`
+---
 
-Dokumentasi lengkap berbahasa Indonesia tersedia di [README.id.md](README.id.md).
+## Fitur & Pembaruan Terbaru
 
-## Core Security & Architectural Guarantees
+1. **Keamanan Inti & Reliabilitas Backend (P0)**:
+   - **Zero Unvalidated SQL Execution**: Setiap kueri SQL (hasil AI, SQL manual, *Refresh Live* dashboard, maupun monitor Action Engine) wajib lolos validator AST PostgreSQL deterministik (`sqlparser` `PostgreSqlDialect`) sebelum dieksekusi.
+   - **Isolasi Scope AST & Ekspresi Analitik**: Isolasi `ScopeContext` untuk subquery/derived table agar bebas *false positive* pada `SELECT *`, validasi penuh cabang `UNION`/`INTERSECT`/`EXCEPT`, serta dukungan aman `AT TIME ZONE`, `IS DISTINCT FROM`, dan operator baca JSON (`->`/`->>`).
+   - **Connection Pool Caching (`AppState`)**: Pool `PgPool` di-cache per `connection_id` dengan fingerprint parameter SHA-256 dan invalidasi otomatis saat koneksi dibuat atau diuji.
+   - **Sesi Cookie `HttpOnly; SameSite=Lax` & Rate Limiting**: Autentikasi sesi browser menggunakan cookie `HttpOnly; SameSite=Lax` (`dta_session`) + endpoint `POST /api/v1/auth/logout` tanpa menyimpan JWT di `localStorage`, dilengkapi pembatasan laju (*sliding-window rate limiter* HTTP `429` + `Retry-After`) pada `/api/v1/auth/login` dan `/api/v1/queries/ask`.
+   - **Proteksi CSV Formula Injection & Logging Terstruktur**: `csv_escape` menetralkan sel berawalan `=`, `+`, `-`, `@`, `\t`, `\r` sebelum ekspor CSV, dan seluruh kegagalan penulisan `audit_logs` / `query_executions` dicatat melalui `tracing::warn!`.
+2. **Sinkronisasi Penuh Backend ↔ Frontend (P1)**:
+   - **Live Interactive Dashboards (`/dashboards`)**: Tiap widget menampilkan `ChartRenderer` + `ResultTable`, mendukung penambahan widget ke dashboard yang sudah ada (`POST /api/v1/dashboards/{id}/widgets`) maupun dashboard baru, serta tombol **Refresh Live** (`POST /api/v1/dashboards/{id}/refresh`) yang memvalidasi ulang SQL sesuai RBAC pemanggil.
+   - **Governance, RBAC & User Management (`/admin`)**: Form registrasi koneksi DB terenkripsi, editor kebijakan RBAC per peran (`PUT /api/v1/admin/rbac/{role}`), manajemen peran & status user (`GET/PUT /api/v1/admin/users`), serta pencarian dan filter `audit_logs`.
+   - **One-Click Re-Open & Multi-Connection Switcher**: Tombol *Open in Workspace / Re-open* pada `/history` menuju `/query`, serta pemilih koneksi aktif (`connection_id`) di `/query` dan `/schema`.
+3. **Autonomous Decision Intelligence & Action Engine (P2)**:
+   - **Pemantauan Terjadwal Read-Only (`/actions`)**: Aturan monitor (`action_rules`) divalidasi oleh AST validator saat dibuat dan dievaluasi secara berkala oleh scheduler Tokio (`spawn_action_scheduler`) menggunakan peran `dta_readonly` sambil mencatat `query_executions` untuk bukti `source_query_id`.
+   - **Alur Human-in-the-Loop (HITL)**: Proposal aksi (`action_proposals`) melewati status `pending` → `approved`/`rejected` → `executed`/`failed` dengan pemisahan wewenang RBAC (hanya `Administrator` atau `DataEngineer` yang dapat menyetujui/mengeksekusi).
+   - **Konektor Non-Destruktif Terenkripsi**: Mendukung `webhook`, `slack_teams`, dan `email_ticket_payload` dengan secret terenkripsi AES-256-GCM, `idempotency_key`, retry terbatas, validasi URL anti-SSRF metadata, dan jejak audit lengkap.
+4. **Generalisasi Planner, Multi-Turn Context & CI/CD (P3)**:
+   - **Konteks Percakapan Multi-Turn**: `/api/v1/queries/ask` dan workspace `/query` mendukung `session_id` + `conversation_history` untuk pertanyaan lanjutan seperti *"by region"*.
+   - **Generalisasi Skema & Rentang Waktu**: Menghilangkan asumsi tahun statis pada `analytics.rs`, `linker.rs`, dan `local_deterministic.rs`, serta mendukung agregasi dinamis berbasis metadata tabel/kolom terizinkan.
+   - **CI/CD GitHub Actions**: Workflow otomatis pada [.github/workflows/ci.yml](.github/workflows/ci.yml) untuk `cargo clippy --all-targets -- -D warnings`, `cargo test`, `tsc --noEmit`, `vitest`, dan `next build`.
 
-1. **Zero Unvalidated SQL Execution**: Every generated or manual SQL query passes through a deterministic PostgreSQL AST validator (`sqlparser` `PostgreSqlDialect`) before reaching PostgreSQL.
-2. **Defense-in-Depth Read-Only Enforcement**:
-   - **AST Gate**: Allows only a single `Statement::Query` (`SELECT` / `WITH` / set ops). Rejects DML/DDL/DCL/admin/transaction statements, comments (`--`, `/*`), multi-statements, `SELECT ... INTO`, locking clauses, `CROSS JOIN`, unbounded `WITH RECURSIVE`, unlisted/dangerous functions (`pg_read_file`, `pg_sleep`, `dblink`, `set_config`, etc.), unauthorized schemas/tables/columns, and RBAC-denied columns (including `SELECT *` leaks).
-   - **Mandatory Row & Byte Caps**: Validated SQL is wrapped in `SELECT * FROM (<sql>) AS _dta_safe_result LIMIT <effective_limit + 1>`, paired with byte-size truncation tracking.
-   - **PostgreSQL Read-Only Boundary**: Queries execute exclusively as role `dta_readonly` (`NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `default_transaction_read_only = on`) inside `BEGIN` -> `SET TRANSACTION READ ONLY` -> `SET LOCAL statement_timeout` -> `SET LOCAL app.current_tenant_region` -> `ROLLBACK`.
-   - **PostgreSQL Row-Level Security (RLS)** on `analytics.orders` and zero grants on `restricted_hr` and `data_to_action_app` for `dta_readonly`.
-3. **Database Separation**:
-   - `data_to_action_analytics`: Source analytics warehouse (`analytics`, `finance`, plus restricted `restricted_hr`).
-   - `data_to_action_app`: Application metadata (`users`, `rbac_policies`, encrypted `db_connections`, `schema_snapshots`, `manual_relationships`, versioned `semantic_metrics`, `query_executions`, `saved_queries`, `dashboards`, encrypted `llm_providers`, `audit_logs`).
-4. **Evidence-Based Grounding**: Charts and business insights preserve `query_id`, source columns, aggregation methods, filters, time range, units, and verify numeric claims against executed rows.
-5. **AI & Model Transparency**: Supports external `openai` and `gemini` HTTP adapters (configurable model names via environment/UI) and a transparent `local_deterministic` schema-and-semantic-grounded planner for verified offline execution.
+---
 
-## Isolated Port Allocation
+## Alokasi Port Terisolasi
 
-| Service | Host | Port | Exposure | Config Env Var |
+| Layanan | Host | Port | Eksposur | Variabel Konfigurasi |
 |---|---|---|---|---|
-| PostgreSQL 17.12.0 (Project-Managed) | `127.0.0.1` | `5439` | Loopback internal | `DTA_PG_PORT` |
-| Rust Axum Backend | `127.0.0.1` | `8420` | Loopback local | `DTA_BACKEND_PORT` |
-| Next.js Tailwind Frontend | `127.0.0.1` | `3420` | Loopback local | `DTA_FRONTEND_PORT` |
+| PostgreSQL `17.12.0` (Portabel Proyek) | `127.0.0.1` | `5439` | Loopback internal | `DTA_PG_PORT` |
+| Backend Rust Axum | `127.0.0.1` | `8420` | Loopback lokal | `DTA_BACKEND_PORT` |
+| Frontend Next.js + Tailwind CSS v4 | `127.0.0.1` | `3420` | Loopback lokal | `DTA_FRONTEND_PORT` |
 
-## Quick Start (Windows PowerShell 5.1)
+---
+
+## Panduan Cepat (Windows PowerShell 5.1)
 
 ```powershell
-# 1. Provision portable PostgreSQL 17.12.0, verify SHA-256, create .env, roles & seed data
+# 1. Unduh & verifikasi SHA-256 PostgreSQL 17.12.0 portabel, buat .env, peran read-only, dan data awal
 powershell -ExecutionPolicy Bypass -File scripts/setup-postgres.ps1
 
-# 2. Start PostgreSQL, Rust Backend, and Next.js Frontend
+# 2. Jalankan PostgreSQL, Backend Rust, dan Frontend Next.js
 powershell -ExecutionPolicy Bypass -File scripts/start.ps1
 
-# 3. Inspect live service status & URLs
+# 3. Periksa status layanan dan URL aktif
 powershell -ExecutionPolicy Bypass -File scripts/status.ps1
 
-# 4. Stop all services cleanly
+# 4. Hentikan seluruh layanan secara bersih
 powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
 ```
 
-## Demo Local RBAC Accounts
+---
 
-Seeded in `data_to_action_app` for local evaluation (see `/login`):
-- `admin@enterprise.local` / `AdminPass!2026` (`administrator`)
-- `analyst@enterprise.local` / `AnalystPass!2026` (`analyst` — `tax_id` masked/denied, CSV export allowed)
-- `business@enterprise.local` / `BusinessPass!2026` (`business_user` — `analytics` only, CSV export denied)
-- `auditor@enterprise.local` / `AuditorPass!2026` (`auditor` — read-only audit & RBAC inspection)
+## Akun Demo RBAC Lokal
 
-## Automated Testing
+Tersedia otomatis di `data_to_action_app` untuk evaluasi lokal (lihat `/login`):
+- `admin@enterprise.local` / `AdminPass!2026` (`administrator` — akses penuh & approval Action Engine)
+- `analyst@enterprise.local` / `AnalystPass!2026` (`analyst` — kolom `tax_id` disembunyikan/ditolak, ekspor CSV diizinkan)
+- `business@enterprise.local` / `BusinessPass!2026` (`business_user` — hanya skema `analytics`, ekspor CSV ditolak)
+- `auditor@enterprise.local` / `AuditorPass!2026` (`auditor` — inspeksi log audit & kebijakan RBAC)
+
+---
+
+## Pengujian Otomatis & Linter
 
 ```powershell
-# Rust Security, Read-Only DB, Schema, Pipeline & RBAC Suites
+# Backend Rust: Clippy & seluruh integration test suite (15 tests)
 cd backend
+cargo clippy --all-targets -- -D warnings
 cargo test -- --test-threads=1
 
-# Frontend Vitest & Production Build
+# Frontend Next.js: TypeCheck, Vitest (9 tests / 4 files) & Production Build
 cd ../frontend
-npm test
 npx tsc --noEmit
+npm test
 npm run build
 ```
 
-## Implemented vs Unavailable Capabilities
+---
 
-- **Implemented & Verified**: Portable PostgreSQL 17.12.0 provisioning; `PostgresAdapter` read-only execution + RLS + timeout + truncation; schema discovery & versioning; semantic catalog versioning; `sqlparser` AST security validator; `local_deterministic` planner; self-correction with mandatory AST revalidation; OpenAI/Gemini HTTP adapters (tested against mock HTTP servers); AES-256-GCM connection/API-key encryption; Argon2id + JWT RBAC; Next.js Tailwind CSS v4 workspace; PowerShell lifecycle scripts.
-- **Explicitly Unimplemented Stub**: `BigQueryAdapterStub` (returns `501 AdapterUnavailable` until real BigQuery credentials/integration are added and tested).
-- **Omitted by Design**: Python/FastAPI worker (Rust `sqlparser` handles AST validation deterministically in-process) and Redis (single-node PostgreSQL + Tokio state suffices).
-- **Requires Operator Keys**: Live vendor API calls to OpenAI or Google Gemini require setting `OPENAI_API_KEY` + `OPENAI_MODEL` or `GEMINI_API_KEY` + `GEMINI_MODEL` in `.env` or Admin UI.
+## Status Kemampuan (Terimplementasi vs Belum Tersedia)
 
-## License
+- **Terimplementasi & Terverifikasi**: Provisioning PostgreSQL `17.12.0` portabel; `PostgresAdapter` read-only + RLS + timeout + pemotongan hasil + pool caching; penemuan skema & snapshot berversi; katalog semantik berversi; validator AST `sqlparser` dengan isolasi subquery & operasi himpunan; planner `local_deterministic` + konteks multi-turn; koreksi mandiri dengan validasi ulang AST; adaptor HTTP OpenAI/Gemini (teruji dengan mock HTTP server); enkripsi AES-256-GCM; RBAC Argon2id + JWT `HttpOnly` cookie + rate limiting; Live Dashboards; Action Center dengan scheduler & approval HITL; CI/CD GitHub Actions; skrip launcher PowerShell.
+- **Stub Eksplisit**: `BigQueryAdapterStub` (mengembalikan `501 AdapterUnavailable` hingga integrasi BigQuery nyata ditambahkan dan diuji).
+- **Memerlukan Konfigurasi Operator**: Pemanggilan API eksternal OpenAI/Gemini membutuhkan `OPENAI_API_KEY` + `OPENAI_MODEL` atau `GEMINI_API_KEY` + `GEMINI_MODEL` di `.env` atau halaman `/admin`; konektor `email_ticket_payload` berjalan dalam mode payload teraudit lokal bila `endpoint_url` webhook/SMTP belum diisi.
 
-Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE) for the full text.
+---
+
+## Lisensi
+
+Proyek ini dilisensikan di bawah **Apache License, Version 2.0** — lihat berkas [LICENSE](LICENSE) untuk ketentuan lengkapnya.

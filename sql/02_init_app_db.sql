@@ -185,3 +185,74 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_query_executions_tenant_created ON query_executions(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created ON audit_logs(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_semantic_metrics_tenant_active ON semantic_metrics(tenant_id, metric_key, is_active);
+
+CREATE TABLE IF NOT EXISTS action_connectors (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name VARCHAR(120) NOT NULL,
+    connector_type VARCHAR(32) NOT NULL CHECK (connector_type IN ('webhook', 'slack_teams', 'email_ticket_payload')),
+    endpoint_url TEXT NOT NULL DEFAULT '',
+    encrypted_secret TEXT NOT NULL DEFAULT '',
+    default_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS action_rules (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    connection_id UUID REFERENCES db_connections(id) ON DELETE SET NULL,
+    saved_query_id UUID REFERENCES saved_queries(id) ON DELETE SET NULL,
+    connector_id UUID REFERENCES action_connectors(id) ON DELETE SET NULL,
+    name VARCHAR(160) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    sql_text TEXT NOT NULL,
+    metric_column VARCHAR(128) NOT NULL,
+    comparator VARCHAR(16) NOT NULL CHECK (comparator IN ('gt', 'gte', 'lt', 'lte', 'eq', 'row_count_gt')),
+    threshold_value DOUBLE PRECISION NOT NULL,
+    schedule_interval_secs INTEGER NOT NULL DEFAULT 300,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_evaluated_at TIMESTAMPTZ,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS action_proposals (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    rule_id UUID REFERENCES action_rules(id) ON DELETE SET NULL,
+    connector_id UUID REFERENCES action_connectors(id) ON DELETE SET NULL,
+    source_query_id UUID,
+    title VARCHAR(200) NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status VARCHAR(24) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'executed', 'failed')),
+    idempotency_key VARCHAR(128) NOT NULL,
+    proposed_by UUID REFERENCES users(id),
+    reviewed_by UUID REFERENCES users(id),
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_at TIMESTAMPTZ,
+    executed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS action_executions (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    proposal_id UUID NOT NULL REFERENCES action_proposals(id) ON DELETE CASCADE,
+    connector_id UUID REFERENCES action_connectors(id) ON DELETE SET NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    http_status INTEGER,
+    outcome VARCHAR(32) NOT NULL,
+    response_summary TEXT NOT NULL DEFAULT '',
+    executed_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_proposals_tenant_status ON action_proposals(tenant_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_action_executions_proposal ON action_executions(proposal_id, created_at DESC);

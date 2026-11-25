@@ -257,14 +257,14 @@ pub fn generate_schema_examples(catalog: &SchemaCatalog, semantics: &[SemanticMe
     if has_orders {
         examples.push("What was the total net revenue last quarter?".to_string());
         examples.push("Show monthly sales trends across completed and shipped orders.".to_string());
-        examples.push("Compare net revenue between Q2 2026 and Q3 2026.".to_string());
+        examples.push("Compare net revenue across the two most recent full quarters.".to_string());
     }
     if has_products && has_items {
         examples.push("Which products generated the highest net revenue?".to_string());
         examples.push("Show the top ten products by gross profit.".to_string());
     }
     if has_orders && has_regions {
-        examples.push("Which regions experienced declining sales in 2026?".to_string());
+        examples.push("Which regions experienced declining sales across recent quarters?".to_string());
     }
     if has_orders && has_customers {
         examples.push("Which customers have the highest transaction volume?".to_string());
@@ -272,9 +272,18 @@ pub fn generate_schema_examples(catalog: &SchemaCatalog, semantics: &[SemanticMe
     if has_expenses {
         examples.push("Which departments have unusual expense patterns compared to budget?".to_string());
     }
-    if examples.is_empty() && !semantics.is_empty() {
+    if examples.is_empty() {
         for m in semantics.iter().take(3) {
             examples.push(format!("Show {} grouped by top available dimension.", m.display_name));
+        }
+        if examples.is_empty() {
+            for t in catalog.tables.iter().take(3) {
+                if let Some(dim) = t.columns.iter().find(|c| {
+                    c.data_type.to_lowercase().contains("char") || c.data_type.to_lowercase().contains("text")
+                }) {
+                    examples.push(format!("Summarize {}.{} grouped by {}.", t.schema, t.name, dim.name));
+                }
+            }
         }
     }
     examples
@@ -318,23 +327,26 @@ fn detect_metric_ambiguity(
         }
     }
 
+    let has_explicit_year = regex::Regex::new(r"\b20\d{2}\b")
+        .map(|re| re.is_match(q_lower))
+        .unwrap_or(false);
+
     if (q_lower.contains("compare") || q_lower.contains("between"))
         && !q_lower.contains("q1")
         && !q_lower.contains("q2")
         && !q_lower.contains("q3")
         && !q_lower.contains("q4")
-        && !q_lower.contains("2025")
-        && !q_lower.contains("2026")
+        && !has_explicit_year
         && !q_lower.contains("quarter")
         && !q_lower.contains("month")
         && !q_lower.contains("year")
     {
         warnings.push(AmbiguityWarning {
             topic: "comparison_periods".to_string(),
-            message: "Please specify which two time periods you would like to compare (for example: Q2 2026 vs Q3 2026, or last month vs prior month).".to_string(),
+            message: "Please specify which two time periods you would like to compare (for example: last two full quarters, or two calendar years).".to_string(),
             options: vec![
-                "Compare Q2 2026 vs Q3 2026".to_string(),
-                "Compare 2025 vs 2026".to_string(),
+                "Compare net revenue across the two most recent full quarters".to_string(),
+                "Compare net revenue year-over-year across the last two years".to_string(),
             ],
         });
     }

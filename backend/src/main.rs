@@ -59,12 +59,14 @@ async fn main() {
         }
     }
 
-    let state = AppState {
-        jwt: JwtService::new(&config.jwt_secret),
-        cipher,
+    let state = AppState::new(
+        config.clone(),
         app_pool,
-        config: config.clone(),
-    };
+        JwtService::new(&config.jwt_secret),
+        cipher,
+    );
+
+    dta_backend::engine::actions::spawn_action_scheduler(state.clone());
 
     let router = build_router(state);
     let addr: SocketAddr = format!("{}:{}", config.backend_host, config.backend_port)

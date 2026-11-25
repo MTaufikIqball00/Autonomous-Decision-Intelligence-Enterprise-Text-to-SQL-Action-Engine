@@ -23,12 +23,7 @@ async fn test_app() -> (axum::Router, AppState) {
         .await
         .expect("bootstrap");
     let jwt = JwtService::new(&config.jwt_secret);
-    let state = AppState {
-        config,
-        app_pool,
-        jwt,
-        cipher,
-    };
+    let state = AppState::new(config, app_pool, jwt, cipher);
     let router = build_router(state.clone());
     (router, state)
 }
@@ -304,4 +299,272 @@ async fn rbac_credential_protection_saved_artifacts_and_audit_logs_enforced() {
         .await
         .unwrap();
     assert_eq!(refresh_resp.status(), StatusCode::OK);
+
+    // 8. Manual execute-validated persists query_executions and works with CSV export
+    let exec_manual = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queries/execute-validated")
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "sql": "SELECT region_code, region_name FROM analytics.regions ORDER BY region_code",
+                        "question": "Manual region lookup"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exec_manual.status(), StatusCode::OK);
+    let manual_json: Value = serde_json::from_slice(
+        &exec_manual.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    let manual_qid = manual_json["query_id"].as_str().unwrap();
+
+    let manual_export = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/queries/export")
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "query_id": manual_qid }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manual_export.status(), StatusCode::OK);
+
+    // 9. HttpOnly cookie auth works for /auth/me and logout clears cookie
+    let login_cookie_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "email": "analyst@enterprise.local", "password": "AnalystPass!2026" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_cookie_resp.status(), StatusCode::OK);
+    let set_cookie = login_cookie_resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(set_cookie.contains("dta_session="));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    let cookie_kv = set_cookie.split(';').next().unwrap().to_string();
+
+    let me_via_cookie = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header(header::COOKIE, cookie_kv)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(me_via_cookie.status(), StatusCode::OK);
+
+    let logout_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout_resp.status(), StatusCode::OK);
+    let logout_cookie = logout_resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(logout_cookie.contains("Max-Age=0"));
+
+    // 10. Rate limiter returns 429 Too Many Requests with Retry-After when exceeded
+    let mut rl_state = state.clone();
+    rl_state.config.login_rate_limit_per_min = 1;
+    let rl_app = build_router(rl_state);
+    let _first = rl_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "email": "ratelimit@acme.local", "password": "wrong" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = rl_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "email": "ratelimit@acme.local", "password": "wrong" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(second.headers().contains_key(header::RETRY_AFTER));
+
+    // 11. P1 Dashboard widget append + live AST-validated refresh + Admin user update guard
+    let create_dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/dashboards")
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "title": "P1 Live Dashboard",
+                        "description": "Live widget refresh test",
+                        "is_shared": true,
+                        "widgets": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_dash.status(), StatusCode::OK);
+    let dash_json: Value = serde_json::from_slice(
+        &create_dash.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    let dash_id = dash_json["id"].as_str().unwrap().to_string();
+
+    let add_widget = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/dashboards/{dash_id}/widgets"))
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "widget": {
+                            "title": "Regions Live",
+                            "question": "List regions",
+                            "sql_text": "SELECT region_code, region_name FROM analytics.regions ORDER BY region_code",
+                            "chart_type": "bar",
+                            "columns": [],
+                            "rows": []
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_widget.status(), StatusCode::OK);
+
+    let refresh_dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/dashboards/{dash_id}/refresh"))
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refresh_dash.status(), StatusCode::OK);
+    let refreshed_json: Value = serde_json::from_slice(
+        &refresh_dash.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert!(!refreshed_json["widgets"][0]["rows"].as_array().unwrap().is_empty());
+    assert!(refreshed_json["widgets"][0]["chart_spec"]["chart_suitable"].is_boolean());
+
+    // Delete test dashboard cleanly
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/dashboards/{dash_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Non-admin cannot update users via PUT /admin/users/{id}
+    let users_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header(header::AUTHORIZATION, format!("Bearer {admin_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(users_resp.status(), StatusCode::OK);
+    let users_json: Value = serde_json::from_slice(
+        &users_resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    let biz_user_id = users_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["email"] == "business@enterprise.local")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    let non_admin_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/admin/users/{biz_user_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {analyst_tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "is_active": false }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(non_admin_put.status(), StatusCode::FORBIDDEN);
 }
