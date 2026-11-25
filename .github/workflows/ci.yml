@@ -52,13 +52,19 @@ jobs:
 
       - name: Initialize PostgreSQL roles and databases
         run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE USER dta_app_user WITH PASSWORD '${DTA_APP_DB_PASSWORD}';"
-          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE USER dta_readonly WITH PASSWORD '${DTA_READONLY_DB_PASSWORD}';"
-          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE DATABASE data_to_action_app OWNER dta_app_user;"
-          psql -h 127.0.0.1 -p 5439 -U postgres -c "CREATE DATABASE data_to_action_analytics;"
-          psql -h 127.0.0.1 -p 5439 -U postgres -d data_to_action_app -f sql/02_init_app_db.sql
-          psql -h 127.0.0.1 -p 5439 -U postgres -d data_to_action_analytics -f sql/01_init_analytics_db.sql
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+          fi
+          psql -h 127.0.0.1 -p 5439 -U postgres -d postgres \
+            -v app_db_name="${DTA_APP_DATABASE}" \
+            -v app_db_user="${DTA_APP_DB_USER}" \
+            -v app_db_password="${DTA_APP_DB_PASSWORD}" \
+            -v analytics_db_name="${DTA_ANALYTICS_DATABASE}" \
+            -v readonly_db_user="${DTA_READONLY_DB_USER}" \
+            -v readonly_db_password="${DTA_READONLY_DB_PASSWORD}" \
+            -f sql/00_setup_databases_and_roles.sql
+          psql -h 127.0.0.1 -p 5439 -U postgres -d "${DTA_ANALYTICS_DATABASE}" -f sql/01_seed_analytics_db.sql
+          PGPASSWORD="${DTA_APP_DB_PASSWORD}" psql -h 127.0.0.1 -p 5439 -U "${DTA_APP_DB_USER}" -d "${DTA_APP_DATABASE}" -f sql/02_init_app_db.sql
 
       - name: Run cargo clippy
         working-directory: backend
